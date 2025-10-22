@@ -7,3 +7,7 @@
 [submodule "source/MaterialXGraphEditor/External/ImGuiNodeEditor"]
 	path = source/MaterialXGraphEditor/External/ImGuiNodeEditor
 	url = https://github.com/thedmd/imgui-node-editor
+[submodule "source/MaterialXRemote/External/cpp-httplib"]
+	path = source/MaterialXRemote/External/cpp-httplib
+	url = https://github.com/yhirose/cpp-httplib.git
+	branch = v0.26.0
