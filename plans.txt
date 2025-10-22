@@ -1,0 +1,152 @@
+Shader lifecycle: load MaterialX document, compile canonical GLSL, accept GLSL overrides per stage, validate builds.
+Geometry management: list available meshes, set active mesh, refresh when resources change, surface errors if mesh missing or malformed.
+Camera & render state: expose camera transforms/FOV, render-state uniforms, deterministic sampling seeds; support bulk updates and reset to canonical state.
+Frame capture: render single frame or fixed sequences, return raw pixels, report metadata (resolution, dtype, geometry used).
+Performance measurement: run warmup/warm frames, report avg/std render time, total GPU time, surface device info.
+Diagnostics: detailed compile logs, shader build errors, geometry/camera validation warnings, GPU/driver info, metrics on dropped frames.
+
+
+Server Handles Needed
+
+POST /material → upload MaterialX document as binary payload, compile canonical GLSL; body: raw `.mtlx` bytes (application/octet-stream or multipart form).
+GET /shader → canonical GLSL stages + metadata for active material (binary payload per stage, e.g. application/octet-stream or multipart).
+POST /shader → validate submitted GLSL (binary payload), activate GLSL package (params: mode canonical/candidate), optional flag to revert; returns success flag + log.
+GET /stages → attribute declarations per stage (vertex/fragment).
+GET /uniforms, POST /uniforms → bulk read/write RenderSpaceState payloads.
+GET /camera, POST /camera → camera transform/FOV read/update.
+GET /geometry, POST /geometry → current mesh descriptor + list vs select new mesh (names/paths only).
+POST /capture → render frames; params: mode (canonical/candidate), count, resolution.
+POST /measure → timing run; params:  mode (canonical/candidate), warmup, frames; returns avg/std, GPU stats.
+GET /diagnostics → latest compile log, warnings, GPU/device info, dropped-frame counts.
+POST /reset → clear shaders/uniforms, revert to canonical.
+This lineup keeps the microservice stateful enough for rendering while giving the client all handles needed to match the ShadertoyDesc workflow without excess endpoints.
+
+POST /reset should reload the original MaterialX document and restore the cached canonical GLSL/renderer state. 
+That’s your “hard reset” to the baseline that shipped with the material. 
+A separate POST /shader with mode="canonical" is only needed if you ever promote a mutated shader to become the new baseline without touching the MaterialX source
+
+Client-driven material lifecycle. The Python client streams `.mtlx` content (binary) to `POST /material`. The server stores it in a session-scoped workspace, runs MaterialXGenGLSL to produce canonical GLSL stages, and exposes them through `GET /shader`. Subsequent overrides are submitted via `POST /shader`. Uploading a new `.mtlx` replaces the session state entirely.
+Alignment With MaterialX/main
+------------------------------
+- Material cataloging: upstream `MaterialXView` still loads a single document per launch; no built-in manifest or directory scan exists. We must add the catalog loader layer described in the plan.
+- Shader lifecycle: current viewer builds canonical GLSL with `mx::GlslShaderGenerator`, but there is no API to retrieve source strings or to install override stages. We need explicit export/import hooks and shader cache management.
+- Uniform introspection: GUI path relies on `PropertyEditor::addItemToForm` and private `_materials`; there is no reusable metadata generator. We need a shared extractor that returns uniform descriptors independent of GUI widgets.
+- Geometry/mesh switching: viewer tracks `_geometryList` and `_selectedGeom` privately; no accessor exists to enumerate or change meshes externally.
+- Camera state: viewer keeps `_cameraPosition`, `_cameraTarget`, etc. private; only setters for position/target/zoom exist. We need getters and a bulk-update struct to guarantee consistency across API and REST.
+- Frame capture & benchmarking: offscreen capture helpers (`_prepare_frame`, `_finish_frame`, `_captureRequested`) are tied to GUI triggers. There is no public single-frame render or timing harness we can call.
+- Diagnostics: shader compile warnings are only surfaced through message dialogs or console logs. We must retain logs in structured form for `/diagnostics`.
+- Threading: GUI-driven code assumes work happens on the nanogui/GLFW thread. The server must serialize GL work onto that same thread to remain safe.
+
+Implementation Plan (no fluff)
+------------------------------
+
+1. **Introduce remote session scaffolding**
+	- Add `source/MaterialXRemote/` with a `RemoteSession` class that owns a hidden-window subclass `RemoteViewer : Viewer` (or a wrapper that embeds one) so we keep the base `Viewer` API untouched.
+	- Provide a command queue so REST handlers push work to the render thread; reuse `nanogui::mainloop()` to keep Nanogui/GLFW alive while preventing any visible UI.
+
+2. **Material upload management**
+	- Implement a session-local storage manager that accepts uploaded `.mtlx` bytes, writes them to a temp directory, and tracks current canonical document metadata.
+	- Validate uploads (size limits, schema presence) before invoking MaterialX loaders; expose the canonical document path only internally.
+
+3. **Canonical shader pipeline hooks**
+	- Implement the shader pipeline inside `RemoteViewer` so the outward-facing API operates strictly on GLSL stages/programs; `mx::MaterialPtr` is only touched during hard reset to rebuild the canonical program.
+	- Provide methods to:
+	  * load a MaterialX document by path and generate canonical vertex/fragment GLSL;
+	  * expose stage source plus attribute/uniform reflection without leaking material pointers;
+	  * accept override GLSL, rebuild an `mx::GlslProgram`, validate, deploy, and cache logs;
+	  * keep canonical vs candidate `mx::GlslProgramPtr` packages in parallel for quick revert.
+
+4. **Uniform metadata extraction**
+	- Refactor the logic inside `PropertyEditor::addItemToForm` into a reusable `MaterialUniformInspector` that returns `{name, type, uiHints, defaultValue, currentValue, editable}`.
+	- Have `RemoteViewer` call the inspector and push uniform edits back through the existing `Viewer` APIs, avoiding new methods on the base class.
+
+5. **Geometry management API**
+	- Let `RemoteViewer` expose read/write helpers that use protected/friend access to `_geometryList` and `_selectedGeom`, so the REST layer can enumerate and switch meshes without widening `Viewer`.
+	- Ensure `setActiveGeometry` refreshes material assignments and reports errors if a mesh is missing.
+
+6. **Camera & render state API**
+	- Define `struct CameraState { mx::Vector3 position; mx::Vector3 target; mx::Vector3 up; float fov; float zoom; }` inside the remote module.
+	- Implement getters/setters on `RemoteViewer` that synchronously read/write the underlying `Viewer` camera members (via friend or protected hooks) so updates remain atomic.
+	- Maintain render-state toggles through a remote-only `RenderState` struct, leaving the base class untouched.
+
+7. **Frame capture helper**
+	- Implement `CapturedFrame RemoteSession::captureFrame(const CaptureParams&)` so it resizes the framebuffer if needed, triggers a single render on the viewer thread, and returns width/height/pixel format/raw buffer.
+	- Add optional sequence capture (looping the same path `count` times) and returning metadata for `/capture`.
+
+8. **Performance measurement**
+	- Recreate a timing harness (`RenderTimer`) using GPU timer queries around the render pass from within `RemoteViewer` to preserve thread safety.
+	- Provide `MeasurementResult RemoteSession::measure(const MeasureParams&)` with average/stddev CPU + GPU times and device info (query via GL strings + MX render context).
+
+9. **Diagnostics store**
+	- Centralize shader compile/build logs, validation warnings, and recent errors in a `DiagnosticsRecorder` (ring buffer of events).
+	- Expose `DiagnosticsSnapshot RemoteSession::getDiagnostics()` for `/diagnostics`.
+
+10. **REST server skeleton**
+	 - Add a lightweight HTTP server wrapper (see Libraries section) that maps endpoints to `RemoteSession` calls, handles JSON serialization, and enforces synchronous responses with task futures.
+	 - Ensure each handler validates payloads, translates exceptions into HTTP status codes, and records diagnostics on failure.
+
+11. **Reset workflow**
+	 - Implement `RemoteSession::reset()` that reloads the last requested material from disk, reapplies canonical shaders/uniforms, resets camera/geometry to catalog defaults, clears diagnostics.
+
+12. **Headless/GUI toggle**
+	 - Add CLI flag `--headless` to skip creating nanogui widgets; instantiate `Viewer` without calling `Viewer::createInterface()` so no visible GUI is produced, but GL context remains available.
+
+13. **Testing & validation harness**
+	 - Script a set of integration tests (Python or C++) that hit each REST endpoint, verify JSON schema, and check rendered output hashes for canonical cases.
+	 - Include perf tests guarded by `MATERIALX_ENABLE_BENCHMARK` to avoid flakiness on CI.
+
+14. **Future scalability hooks**
+	- After the single-threaded prototype is stable, introduce an optional worker pool for capture/measure requests (bounded queue + dedicated render thread affinity) so higher throughput can be enabled without redesigning the API.
+
+Method & API Surface Requirements
+---------------------------------
+`MaterialXRemote/RemoteViewer` (subclass/wrapper around `Viewer`):
+- `void loadMaterial(const MaterialBuffer& buffer);`
+- `ShaderPackage getCanonicalShader() const;`
+- `ShaderBuildResult applyShaderOverride(const ShaderPackage& candidate);`
+- `void resetShaders();`
+- `std::vector<UniformDescriptor> describeUniforms(bool includeNonEditable = false) const;`
+- `void setUniformValues(const std::vector<UniformValue>& values);`
+- `std::vector<GeometryInfo> listGeometry() const;`
+- `GeometryInfo getActiveGeometryInfo() const;`
+- `void setActiveGeometry(const std::string& id);`
+- `CameraState getCameraState() const;`
+- `void setCameraState(const CameraState& state);`
+- `RenderState getRenderState() const;`
+- `void setRenderState(const RenderState& state);`
+- `CapturedFrame renderFrame(const CaptureParams& params);`
+- `MeasurementResult measure(const MeasureParams& params);`
+- `DiagnosticsSnapshot snapshotDiagnostics() const;`
+
+Supporting structs (new headers under `MaterialXRemote/Types.h`):
+- `struct MaterialBuffer { std::string name; std::vector<uint8_t> bytes; };`
+- `struct GeometryInfo { std::string id; std::string label; mx::FilePath source; };`
+- `struct UniformDescriptor { std::string name; std::string type; mx::ValuePtr defaultValue; mx::ValuePtr currentValue; UIHints hints; bool editable; };`
+- `struct UniformValue { std::string name; mx::ValuePtr value; };`
+- `struct ShaderStage { std::string stage; std::vector<uint8_t> payload; std::vector<AttributeDecl> attributes; };`
+- `struct ShaderPackage { ShaderStage vertex; ShaderStage fragment; };`
+- `struct ShaderBuildResult { bool success; std::string log; };`
+- `struct CaptureParams { unsigned width; unsigned height; unsigned count; ShaderMode mode; };`
+- `struct CapturedFrame { unsigned width; unsigned height; std::string format; std::vector<uint8_t> pixels; RenderMetadata meta; };`
+- `struct MeasureParams { unsigned warmup; unsigned frames; ShaderMode mode; };`
+- `struct MeasurementResult { double avgCpuMs; double stdCpuMs; double avgGpuMs; double stdGpuMs; std::string device; };`
+- `struct DiagnosticsSnapshot { std::vector<DiagnosticEvent> events; std::string gpuInfo; unsigned droppedFrames; };`
+
+REST Facade (new `RemoteServer` class):
+- `void start(const RemoteConfig&);`
+- `void stop();`
+- Handler methods for each endpoint delegating to `RemoteSession` (material upload consumes `application/octet-stream` payloads).
+
+Library & Dependency Choices
+-----------------------------
+- **HTTP server:** `cpp-httplib` (header-only, MIT, HTTPS optional) keeps footprint tiny and avoids CMake complexity. Alternatives like Drogon/Crow/Boost.Beast are heavier and unnecessary for our focused API.
+- **JSON serialization:** reuse `Json::Value` (jsoncpp already bundled) to minimize new deps; optionally wrap conversions for ergonomic use with `nlohmann::json` only if schema handling becomes cumbersome.
+- **Concurrency:** standard library (`std::mutex`, `std::condition_variable`, `std::future`) is sufficient for request/response coordination.
+- **Logging:** continue using `std::cout`/`std::cerr` or adopt `MaterialXLog` utilities; no extra logging framework needed.
+- **Compression/base64:** MaterialX already depends on base64 helpers in `drogon::utils`; if unavailable, introduce a small standalone encoder (header-only) for `/capture` payloads.
+- **GUI:** not required for REST usage, but Nanogui/GLFW remain essential for context creation and render pipeline; we simply avoid constructing GUI widgets in headless mode.
+
+Outstanding Questions / Follow-ups
+----------------------------------
+- Capture/measure latency budget: agree on the maximum end-to-end time the client will tolerate per request so we can size the render task queue (e.g., single worker vs bounded pool) and decide whether to chunk long measurements into asynchronous jobs.
+- Capture payload format: choose between returning base64-encoded pixel buffers inline (simple HTTP payload, easy for a co-located Python client) or writing to shared memory/temporary files with handles (more efficient for huge frames but requires extra coordination).
