@@ -35,6 +35,7 @@ project(MaterialX VERSION ${MATERIALX_LIBRARY_VERSION})
 
 option(MATERIALX_BUILD_PYTHON "Build the MaterialX Python package from C++ bindings. Requires Python 3.9 or greater." OFF)
 option(MATERIALX_BUILD_VIEWER "Build the MaterialX Viewer." OFF)
+option(MATERIALX_BUILD_REMOTE "Build the MaterialX remote renderer components." OFF)
 option(MATERIALX_BUILD_GRAPH_EDITOR "Build the MaterialX Graph Editor." OFF)
 option(MATERIALX_BUILD_DOCS "Create HTML documentation using Doxygen. Requires that Doxygen be installed." OFF)
 
@@ -110,6 +111,10 @@ endif()
 # All hardware shading languages currently depend on the GLSL shader generator.
 if(MATERIALX_BUILD_GEN_MSL)
     set(MATERIALX_BUILD_GEN_GLSL ON)
+endif()
+
+if (MATERIALX_BUILD_REMOTE)
+    set(MATERIALX_BUILD_VIEWER ON CACHE BOOL "Build the MaterialX Viewer." FORCE)
 endif()
 
 set(MATERIALX_PYTHON_VERSION "" CACHE STRING
@@ -486,6 +491,9 @@ if(MATERIALX_BUILD_RENDER)
         if(MATERIALX_BUILD_GEN_GLSL AND NOT MATERIALX_BUILD_APPLE_EMBEDDED)
             set(MATERIALX_BUILD_RENDER_HW ON)
             add_subdirectory(source/MaterialXRenderGlsl)
+    if (MATERIALX_BUILD_REMOTE)
+        add_subdirectory(source/MaterialXRemote)
+    endif()
         endif()
         if(MATERIALX_BUILD_GEN_MSL AND APPLE)
             set(MATERIALX_BUILD_RENDER_HW ON)

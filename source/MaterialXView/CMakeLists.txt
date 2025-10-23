@@ -91,11 +91,11 @@ else()
     set(CMAKE_CXX_COMPILER_ID PREV_COMPILER_ID)
 endif()
 
-file(GLOB materialx_source       "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
-file(GLOB materialx_headers      "${CMAKE_CURRENT_SOURCE_DIR}/*.h*")
+file(GLOB materialx_sources "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
+file(GLOB materialx_headers "${CMAKE_CURRENT_SOURCE_DIR}/*.h*")
 
-add_definitions(${NANOGUI_EXTRA_DEFS})
-add_definitions(${MATERIALXVIEW_RENDER_BACKEND_DEFINITIONS})
+set(materialx_main "${CMAKE_CURRENT_SOURCE_DIR}/Main.cpp")
+list(REMOVE_ITEM materialx_sources "${materialx_main}")
 
 set(MATERIALX_LIBRARIES
     MaterialXFormat
@@ -110,8 +110,8 @@ if("${NANOGUI_PREFERRED_BACKEND}" STREQUAL "Metal")
         MaterialXGenMsl
         MaterialXRenderMsl)
 
-    LIST(REMOVE_ITEM materialx_source "${CMAKE_CURRENT_SOURCE_DIR}/RenderPipelineGL.cpp")
-    LIST(APPEND materialx_source "${CMAKE_CURRENT_SOURCE_DIR}/RenderPipelineMetal.mm")
+    LIST(REMOVE_ITEM materialx_sources "${CMAKE_CURRENT_SOURCE_DIR}/RenderPipelineGL.cpp")
+    LIST(APPEND materialx_sources "${CMAKE_CURRENT_SOURCE_DIR}/RenderPipelineMetal.mm")
 endif()
 
 if (MATERIALX_BUILD_GEN_OSL)
@@ -121,19 +121,35 @@ if (MATERIALX_BUILD_GEN_MDL)
     LIST(APPEND MATERIALX_LIBRARIES MaterialXGenMdl)
 endif()
 
-add_executable(MaterialXView ${materialx_source} ${materialx_headers})
+add_library(MaterialXViewLib ${materialx_sources} ${materialx_headers})
 
 target_link_libraries(
-    MaterialXView
+    MaterialXViewLib
+    PUBLIC
     ${MATERIALX_LIBRARIES}
+    PRIVATE
     ${NANOGUI_LIBRARIES}
     ${NANOGUI_EXTRA_LIBS})
 
 target_include_directories(
-    MaterialXView
+    MaterialXViewLib
+    PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/NanoGUI/include>
     PRIVATE
     ${NANOGUI_INCLUDE_DIRS}
     ${NANOGUI_EXTRA_INCS})
+
+target_compile_definitions(
+    MaterialXViewLib
+    PUBLIC
+    ${NANOGUI_EXTRA_DEFS}
+    ${MATERIALXVIEW_RENDER_BACKEND_DEFINITIONS})
+
+add_executable(MaterialXView ${materialx_main})
+
+target_link_libraries(MaterialXView PRIVATE MaterialXViewLib)
 
 set_target_properties(
     MaterialXView PROPERTIES
