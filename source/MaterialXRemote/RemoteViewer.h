@@ -47,6 +47,15 @@ class RemoteViewer : public ::Viewer
   // program on the render thread and returns a JSON diagnostics object.
   Json::Value applyShaderPackage(const ShaderPackage& pkg);
 
+  /// Render using the current session shader package (merged with generated stages if needed),
+  /// capture `frames` frames at `width` x `height`, perform `warmup` initial frames (not timed),
+  /// and return a pair of JSON metadata and a vector of PNG byte strings (one per frame).
+  std::pair<Json::Value, std::vector<std::string>> renderAndCapture(const ShaderPackage& pkg,
+                                    unsigned int frames,
+                                    unsigned int width,
+                                    unsigned int height,
+                                    unsigned int warmup);
+
     bool isHeadless() const { return _options.headless; }
 
   private:

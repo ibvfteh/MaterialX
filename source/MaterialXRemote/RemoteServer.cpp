@@ -8,6 +8,7 @@
 #include <MaterialXRemote/Types.h>
 #include <MaterialXRemote/MaterialCatalog.h>
 #include <fstream>
+#include <MaterialXRemote/RemoteViewer.h>
 
 #include <json/json.h>
 
@@ -431,25 +432,304 @@ void RemoteServer::Impl::registerRoutes()
 
             // Persist package in session
             _session->setShaderPackage(current);
+            // Persist only: do not compile/apply here. Clients should call /render to build and exercise the program.
+            Json::Value out; Json::Value stages(Json::objectValue); stages["vertex"] = current.vertex; stages["fragment"] = current.fragment; out["stages"] = stages; out["status"] = "stored"; Json::StreamWriterBuilder builder; builder["indentation"] = "";
+            res.status = 200; res.set_content(Json::writeString(builder, out), "application/json");
+        }
+        catch (const std::exception& ex)
+        {
+            res.status = 500; res.set_content(ex.what(), "text/plain");
+        }
+    });
 
-            // Enqueue compile/apply on render thread so the running viewer will use the provided stages.
-            auto future = _session->enqueue([current](RemoteViewer& viewer) {
+    // Render endpoint: compile current session shader package, render frames and return multipart/mixed
+    _server->Post("/render", [this](const httplib::Request& req, httplib::Response& res) {
+        try
+        {
+            // Parse optional parameters: frames, width, height, warmup
+            unsigned int frames = 1u;
+            unsigned int width = 128u;
+            unsigned int height = 128u;
+            unsigned int warmup = 0u;
+
+            if (!req.body.empty())
+            {
+                Json::CharReaderBuilder reader; Json::Value body; std::string errs; std::istringstream iss(req.body);
+                if (!Json::parseFromStream(reader, iss, &body, &errs)) { res.status = 400; res.set_content(errs, "text/plain"); return; }
+                if (body.isMember("frames")) frames = body["frames"].asUInt();
+                if (body.isMember("width")) width = body["width"].asUInt();
+                if (body.isMember("height")) height = body["height"].asUInt();
+                if (body.isMember("warmup")) warmup = body["warmup"].asUInt();
+            }
+
+            // Capture the current shader package (may be partial); we'll merge missing stages on the render thread.
+            ShaderPackage sessionPkg = _session->getShaderPackage();
+
+            using RenderResult = std::pair<Json::Value, std::vector<std::string>>;
+
+            auto future = _session->enqueue([sessionPkg, frames, width, height, warmup](RemoteViewer& viewer) -> RenderResult {
+                return viewer.renderAndCapture(sessionPkg, frames, width, height, warmup);
+            });
+
+            RenderResult result = future.get();
+
+            // Build multipart/mixed response body
+            Json::StreamWriterBuilder jbuilder; jbuilder["indentation"] = "";
+            const std::string metadataStr = Json::writeString(jbuilder, result.first);
+
+            const std::string boundary = "MX_BOUNDARY_" + std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count());
+            std::string body;
+            auto appendLine = [&body](const std::string& s) { body.append(s); body.append("\r\n"); };
+
+            // JSON part
+            appendLine("--" + boundary);
+            appendLine("Content-Type: application/json; charset=utf-8");
+            appendLine("");
+            body.append(metadataStr);
+            body.append("\r\n");
+
+            // Image parts
+            for (size_t i = 0; i < result.second.size(); ++i)
+            {
+                const std::string& img = result.second[i];
+                appendLine("--" + boundary);
+                appendLine("Content-Type: application/octet-stream");
+                appendLine(std::string("Content-Disposition: attachment; filename=\"frame_") + std::to_string(i) + ".raw\"");
+                appendLine(std::string("Content-Length: ") + std::to_string(img.size()));
+                appendLine("");
+                // Binary raw RGB data
+                body.append(img.data(), img.size());
+                body.append("\r\n");
+            }
+
+            // Final boundary
+            appendLine("--" + boundary + "--");
+
+            const std::string contentType = std::string("multipart/mixed; boundary=") + boundary;
+            res.status = 200;
+            res.set_content(body, contentType.c_str());
+        }
+        catch (const std::exception& ex)
+        {
+            res.status = 500; res.set_content(ex.what(), "text/plain");
+        }
+    });
+
+    // Uniforms endpoints: bulk read/write of public uniforms on the selected material
+    _server->Get("/uniforms", [this](const httplib::Request& req, httplib::Response& res) {
+        try
+        {
+            auto future = _session->enqueue([](RemoteViewer& viewer) {
                 Json::Value out(Json::objectValue);
-                try
+                Json::Value list(Json::arrayValue);
+
+                mx::MaterialPtr material = viewer.getSelectedMaterial();
+                if (!material)
                 {
-                    // applyShaderPackage should compile the program and return diagnostic info.
-                    Json::Value diag = viewer.applyShaderPackage(current);
-                    out["apply"] = diag;
+                    out["error"] = "No selected material available";
+                    return out;
                 }
-                catch (const std::exception& e)
+
+                const mx::VariableBlock* publicUniforms = material->getPublicUniforms();
+                if (!publicUniforms)
                 {
-                    out["error"] = e.what();
+                    out["uniforms"] = list;
+                    return out;
                 }
+
+                for (const auto& uniform : publicUniforms->getVariableOrder())
+                {
+                    // Verify the uniform is actually present and editable in the compiled program
+                    if (!material->findUniform(uniform->getPath()))
+                    {
+                        continue;
+                    }
+                    Json::Value item(Json::objectValue);
+                    item["path"] = uniform->getPath();
+                    item["name"] = uniform->getName();
+                    item["variable"] = uniform->getVariable();
+                    item["value"] = uniform->getValue() ? uniform->getValue()->getValueString() : Json::Value();
+                    item["type"] = uniform->getType().getName();
+                    if (!uniform->getUnit().empty()) item["unit"] = uniform->getUnit();
+                    if (!uniform->getColorSpace().empty()) item["colorspace"] = uniform->getColorSpace();
+                    list.append(item);
+                }
+
+                out["uniforms"] = list;
                 return out;
             });
 
-            Json::Value applyResult = future.get();
-            Json::Value out; Json::Value stages(Json::objectValue); stages["vertex"] = current.vertex; stages["fragment"] = current.fragment; out["stages"] = stages; out["result"] = applyResult; Json::StreamWriterBuilder builder; builder["indentation"] = "";
+            Json::Value response = future.get();
+            Json::StreamWriterBuilder builder; builder["indentation"] = "";
+            res.status = 200; res.set_content(Json::writeString(builder, response), "application/json");
+        }
+        catch (const std::exception& ex)
+        {
+            res.status = 500; res.set_content(ex.what(), "text/plain");
+        }
+    });
+
+    _server->Post("/uniforms", [this](const httplib::Request& req, httplib::Response& res) {
+        try
+        {
+            Json::CharReaderBuilder reader; Json::Value body; std::string errs; std::istringstream iss(req.body);
+            if (!Json::parseFromStream(reader, iss, &body, &errs)) { res.status = 400; res.set_content(errs, "text/plain"); return; }
+
+            if (!body.isMember("uniforms") || !body["uniforms"].isArray())
+            {
+                res.status = 400; res.set_content("Request must contain a 'uniforms' array", "text/plain");
+                return;
+            }
+
+            // Capture the payload locally, then apply on the render thread.
+            Json::Value payload = body["uniforms"];
+
+            auto future = _session->enqueue([payload](RemoteViewer& viewer) {
+                Json::Value out(Json::objectValue);
+                Json::Value results(Json::arrayValue);
+
+                mx::MaterialPtr material = viewer.getSelectedMaterial();
+                if (!material)
+                {
+                    out["error"] = "No selected material available";
+                    return out;
+                }
+
+                for (const Json::Value& entry : payload)
+                {
+                    Json::Value item(Json::objectValue);
+                    std::string path;
+                    std::string valueStr;
+                    if (entry.isMember("path")) path = entry["path"].asString();
+                    else if (entry.isMember("name")) path = entry["name"].asString();
+                    if (entry.isMember("value")) valueStr = entry["value"].asString();
+
+                    item["path"] = path;
+
+                    if (path.empty())
+                    {
+                        item["status"] = "error";
+                        item["message"] = "Missing path";
+                        results.append(item);
+                        continue;
+                    }
+
+                    mx::ShaderPort* uniform = material->findUniform(path);
+                    if (!uniform)
+                    {
+                        item["status"] = "error";
+                        item["message"] = "Uniform not found or not active in program";
+                        results.append(item);
+                        continue;
+                    }
+
+                    try
+                    {
+                        // Construct a typed Value for the uniform and modify it.
+                        mx::ValuePtr v = mx::Value::createValueFromStrings(valueStr, uniform->getType().getName());
+                        material->modifyUniform(path, v, valueStr);
+                        item["status"] = "ok";
+                    }
+                    catch (const std::exception& ex)
+                    {
+                        item["status"] = "error";
+                        item["message"] = ex.what();
+                    }
+                    results.append(item);
+                }
+
+                out["results"] = results;
+                return out;
+            });
+
+            Json::Value response = future.get(); Json::StreamWriterBuilder builder; builder["indentation"] = "";
+            res.status = 200; res.set_content(Json::writeString(builder, response), "application/json");
+        }
+        catch (const std::exception& ex)
+        {
+            res.status = 500; res.set_content(ex.what(), "text/plain");
+        }
+    });
+
+    // Reset endpoint: restore session ShaderPackage from the currently selected SessionMaterial's canonical generated shader
+    _server->Post("/shader/reset", [this](const httplib::Request& req, httplib::Response& res) {
+        try
+        {
+            auto pkgFuture = _session->enqueue([](RemoteViewer& viewer) {
+                ShaderPackage pkg;
+                mx::MaterialPtr material = viewer.getSelectedMaterial();
+                if (!material)
+                {
+                    return pkg;
+                }
+                mx::ShaderPtr shader = material->getShader();
+                if (!shader)
+                {
+                    return pkg;
+                }
+                pkg.vertex = shader->getSourceCode(mx::Stage::VERTEX);
+                pkg.fragment = shader->getSourceCode(mx::Stage::PIXEL);
+                return pkg;
+            });
+
+            ShaderPackage canonical = pkgFuture.get();
+            if (canonical.vertex.empty() && canonical.fragment.empty())
+            {
+                res.status = 400; res.set_content("No generated shader available to reset from", "text/plain");
+                return;
+            }
+            _session->setShaderPackage(canonical);
+            Json::Value out; out["status"] = "ok"; Json::StreamWriterBuilder builder; builder["indentation"] = "";
+            res.status = 200; res.set_content(Json::writeString(builder, out), "application/json");
+        }
+        catch (const std::exception& ex)
+        {
+            res.status = 500; res.set_content(ex.what(), "text/plain");
+        }
+    });
+
+    // Session-wide reset: reload the selected session material (restores camera & uniforms)
+    // and reset the session shader package to the generated canonical package.
+    _server->Post("/reset", [this](const httplib::Request& req, httplib::Response& res) {
+        try
+        {
+            if (!_session->hasSessionMaterial())
+            {
+                res.status = 400;
+                res.set_content("No session material selected", "text/plain");
+                return;
+            }
+
+            SessionMaterial stored = _session->currentSessionMaterial();
+
+            // Reload the material document on the render thread (this will restore document-level values and camera state)
+            auto loadFuture = _session->enqueue([stored](RemoteViewer& viewer) {
+                viewer.loadDocumentFromFile(mx::FilePath(stored.filePath));
+                return Json::Value();
+            });
+            loadFuture.get();
+
+            // After loading, capture the generated canonical shader stages on the render thread
+            auto pkgFuture = _session->enqueue([](RemoteViewer& viewer) {
+                ShaderPackage pkg;
+                mx::MaterialPtr material = viewer.getSelectedMaterial();
+                if (!material)
+                {
+                    return pkg;
+                }
+                mx::ShaderPtr shader = material->getShader();
+                if (!shader)
+                {
+                    return pkg;
+                }
+                pkg.vertex = shader->getSourceCode(mx::Stage::VERTEX);
+                pkg.fragment = shader->getSourceCode(mx::Stage::PIXEL);
+                return pkg;
+            });
+            ShaderPackage canonical = pkgFuture.get();
+            _session->setShaderPackage(canonical);
+
+            Json::Value out; out["status"] = "ok"; Json::StreamWriterBuilder builder; builder["indentation"] = "";
             res.status = 200; res.set_content(Json::writeString(builder, out), "application/json");
         }
         catch (const std::exception& ex)

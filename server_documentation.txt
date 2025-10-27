@@ -1,0 +1,114 @@
+MaterialX Remote Server — Shortcut Documentation
+
+Scope
+- Concise reference for the built-in HTTP handles provided by the MaterialX Remote Server.
+- Endpoints are synchronous: each request that needs GL or MaterialX work enqueues a task on the render thread and waits for completion before replying.
+
+Global notes
+- All GL / MaterialX operations run on the render thread via RemoteSession::enqueue. Clients send requests to the HTTP server; handlers block until render-thread work completes.
+- Content types: JSON payloads use application/json. Binary frame parts in /render responses are application/octet-stream inside multipart/mixed.
+- Error codes: 200 OK on success; 400 for client errors (missing params, no session material); 500 for server exceptions.
+
+Dependencies (compile/runtime)
+- MaterialX core and modules (MaterialXGen*, MaterialXRender*, MaterialXView).
+- nanogui (used for render-thread scheduling: nanogui::async).
+- cpp-httplib (HTTP server) and jsoncpp for JSON payloads.
+
+HTTP handles
+
+GET /health
+- Purpose: quick health/status check.
+- Response: { "status": "ok" | "uninitialized" }
+- Notes: does not block render thread.
+
+GET /materials
+- Purpose: list entries in the configured material catalog (resources/Materials by default).
+- Response: JSON array of { name, filePath, verified }.
+
+POST /materials/select
+- Body: { "name": "catalogEntryName" }
+- Purpose: select a material from the catalog into the session and load the document on the render thread.
+- Behavior: enqueues document load on render thread, then captures canonical generated shader stages and stores them in-session.
+- Response: { "name":..., "filePath":... }
+
+GET /shader
+- Purpose: return shader stages for the currently selected material.
+- Behavior: if a session shader override exists it is merged with generated stages so missing stages are filled by generated code.
+- Response: { "stages": { "vertex": "...", "fragment": "..." } } or { "error": "..." }
+
+POST /shader
+- Body: { "vertex": "...", "fragment": "..." } or { "clear": true }
+- Purpose: persist a session shader override package (vertex/fragment strings).
+- Important: This endpoint stores the override only — it does not compile or apply it. Clients should call POST /render to build and run the program.
+- Response: { "stages": { ... }, "status": "stored" } or { "status": "cleared" }
+
+POST /shader/reset
+- Purpose: restore the session ShaderPackage to the canonical generated shader for the currently selected material.
+- Behavior: executed on render thread, captures generated vertex/fragment sources and writes them into session shader package.
+- Response: { "status": "ok" } or 400 if no generated shader available.
+- Note: this sets the session shader package to canonical stages.
+
+POST /reset
+- Purpose: session-wide reset. Reloads the selected session material (restores document-level state: uniforms, camera, etc.) and sets the session ShaderPackage to the canonical generated shader.
+- Behavior: enqueues document reload on the render thread (viewer.loadDocumentFromFile) which reinitializes viewer state (camera, uniforms that are stored in the document). Then captures canonical shader stages and persists them in-session.
+- Response: { "status": "ok" } or 400 if no session material selected.
+
+POST /render
+- Body: optional JSON: { "frames": N, "width": W, "height": H, "warmup": M }
+- Purpose: synchronously build the program (merging session shader override with generated stages if needed), render N frames at W x H, measure timings, and return images + metadata.
+- Response: multipart/mixed where the first part is JSON metadata and each subsequent part is a raw image buffer (application/octet-stream) corresponding to frames in order.
+- Metadata (JSON) fields of interest:
+  - status: "ok" or "error"
+  - frames: integer
+  - timings_ms: [ per-frame timing in ms ]
+  - frames_info: [ { index, width, height, channels, dtype, byteLength, origin }, ... ]
+    - dtype: currently "float32" (server repacks GPU readback into tightly-packed float32 RGB for fidelity)
+    - byteLength: exact size in bytes of the binary part for that frame
+- Binary parts: ordered to match frames_info; clients should use frames_info to decode shapes and dtypes.
+
+GET /geometry
+- Purpose: list available mesh partitions and the active geometry id.
+- Response: { "geometry": [ ... ], "active": "id" }
+
+POST /geometry
+- Body: { "id": "geometryId" }
+- Purpose: select active geometry by id. Runs on render thread.
+- Response: { "status": "ok" }
+
+GET /lights
+- Purpose: query environment/light state.
+- Response: { "envRadianceFilename": "...", "envLightIntensity": float, "lightRotation": float }
+
+POST /lights
+- Body: { "envRadianceFilename": "...", "envLightIntensity": float, "lightRotation": float }
+- Purpose: set environment and light parameters (renders on render thread).
+- Response: { "status": "ok" }
+
+GET /camera
+- Purpose: return camera state { position:[x,y,z], target:[x,y,z], viewAngle, zoom }
+
+POST /camera
+- Body: { "position": [x,y,z], "target": [x,y,z], "viewAngle": float, "zoom": float }
+- Purpose: set camera state (applied on render thread). Response: { "status": "ok" }
+
+GET /uniforms
+- Purpose: return a bulk dump of public uniforms for the currently selected material along with UI metadata when available.
+- Response: { "uniforms": [ { "path", "name", "variable", "value", "type", "unit"?, "colorspace"?, /* optional UI hints */ "uiMin"?, "uiMax"?, "uiSoftMin"?, "uiSoftMax"?, "uiStep"?, "enumeration"? }, ... ] }
+- Notes: UI fields (uiMin/uiMax etc.) are returned when defined in the document and are surfaced from MaterialX's UI helpers. Values are returned as strings (valueString) to let clients parse according to `type`.
+
+POST /uniforms
+- Body: { "uniforms": [ { "path": "...", "value": "..." }, ... ] }
+- Purpose: bulk set public uniform values. Each entry is applied on the render thread via MaterialX value helpers.
+- Behavior: for each entry server attempts to create a typed Value (createValueFromStrings) and calls material->modifyUniform(path, value, valueString).
+- Response: { "results": [ { "path": "...", "status": "ok"|"error", "message"? }, ... ] }
+
+Implementation notes and caveats
+- Synchronous behavior: most endpoints that affect or read GL/shader/program state enqueue a function to the render thread and wait for the future to complete. This makes requests blocking but simple for clients.
+- Shader application: POST /shader persists overrides but does not compile or apply them. Use POST /render (which compiles and executes) to exercise shader changes.
+- Frame fidelity: server repacks readback into tightly-packed float32 RGB frames for lossless comparisons. Clients must respect frames_info dtype/shape for correct decoding.
+- All operations must run on the render thread — do not attempt direct GL or MaterialX calls from server threads in other code paths.
+
+Contact
+- For detailed protocol changes or custom transport requirements, extend the server routes and keep authoritative metadata in responses to avoid client-side heuristics.
+
+(End)

@@ -304,7 +304,7 @@ class Viewer : public ng::Screen
         _renderPipeline->bakeTextures();
     }
 
-  private:
+    protected:
     void draw_contents() override;
     bool keyboard_event(int key, int scancode, int action, int modifiers) override;
     bool scroll_event(const ng::Vector2i& p, const ng::Vector2f& rel) override;
@@ -392,7 +392,11 @@ class Viewer : public ng::Screen
     // Set shader interface type
     void setShaderInterfaceType(mx::ShaderInterfaceType interfaceType);
 
-  private:
+    protected:
+        // Protected accessor for subclasses to use the render pipeline directly
+        RenderPipelinePtr getRenderPipeline() { return _renderPipeline; }
+
+    private:
     ng::ref<ng::Window> _window;
     RenderPipelinePtr _renderPipeline;
 
