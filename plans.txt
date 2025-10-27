@@ -26,6 +26,41 @@ That’s your “hard reset” to the baseline that shipped with the material.
 A separate POST /shader with mode="canonical" is only needed if you ever promote a mutated shader to become the new baseline without touching the MaterialX source
 
 Client-driven material lifecycle. The Python client streams `.mtlx` content (binary) to `POST /material`. The server stores it in a session-scoped workspace, runs MaterialXGenGLSL to produce canonical GLSL stages, and exposes them through `GET /shader`. Subsequent overrides are submitted via `POST /shader`. Uploading a new `.mtlx` replaces the session state entirely.
+
+Server-side material catalog (session supplier / verifier)
+-------------------------------------------------------
+- Purpose: provide an optional server-hosted material package (a verified supplier) that the client can query and select from, similar to how geometry and lights are exposed and controlled by the server. This keeps canonical materials near the server and lets the client act as a consumer/verifier.
+- Location & config: add a small server config option (CLI flag or `RemoteServer::Config` field) called `materialCatalogPath` that defaults to a sensible folder inside the tree near RemoteServer, e.g. `source/MaterialXRemote/Materials` (or `resources/Materials/ServerCatalog`). If provided, the server will scan this path for `*.mtlx` files at startup and load/verify them into a read-only catalog.
+- Startup behavior:
+	* On start, if `materialCatalogPath` is set and exists, scan for `.mtlx` files, parse each file through the same `MaterialStorage` validation pipeline (but do not overwrite session state), and record a catalog entry for each file with metadata (sourceName, byteSize, versionString, hasSchemaReference, materialNodeCount, timestamp).
+	* Optionally pre-generate canonical GLSL for each verified catalog entry and cache the resulting vertex/fragment strings (configurable - default: off to save startup time). Cache entries should be stored in memory within the server process (e.g., `MaterialCatalog::Entry { StoredDocument metadata; optional<ShaderPackage> canonical; bool verified; }`).
+- REST endpoints to add (small, explicit):
+	* GET /materials
+		- Response: JSON array of catalog entries: { name, sourceName, byteSize, versionString, hasSchemaReference, materialNodeCount, timestamp, verified }
+	* GET /materials/{name}
+		- Response: full metadata + optional cached `{ stages: { vertex, fragment } }` if pre-generated, else `cached=false`.
+	* POST /materials/select
+		- Body: JSON { "name": "catalog-entry-name" }
+		- Behavior: mark the selected catalog material as the session's primary material. The server should:
+				1) copy or reference the catalog file into the session workspace (so subsequent `POST /reset` can revert to it),
+				2) enqueue a render-thread call to load the material into the viewer (same behavior as for uploaded materials),
+				3) set a session-scoped `selectedMaterialName` (or `selectedMaterialPath`) value that `POST /reset` will use to perform the hard reset to this baseline.
+		- Response: 200 with metadata JSON.
+- Interaction with existing flows:
+	* `POST /material` (client upload) remains the canonical upload pathway. Catalog selection is simply a convenience and a trustable supply for clients that don't wish to stream content.
+	* Selecting a catalog material should be functionally equivalent to uploading that `.mtlx` and making it active for the session, including running the same validation and viewer load logic.
+- Security & verification:
+	* Server should validate catalog files on startup and mark entries as `verified` (pass validation). If validation fails for a file, it should be excluded or flagged.
+	* Optionally expose a `verified` boolean on catalog entries so clients can decide whether to use them as trusted baselines.
+- Reset semantics:
+	* When `selectedMaterialName` is set for the session, `POST /reset` should reload that file from the session workspace (or the catalog source) and rebuild canonical shaders/uniforms. If no selected material exists, `POST /reset` clears any uploaded/candidate changes and returns to an empty baseline.
+- Implementation suggestions (minimal changes):
+	* Add `MaterialCatalog` small class under `source/MaterialXRemote/` that enumerates files and holds `StoredDocument` metadata plus an optional cached ShaderPackage.
+	* Wire `RemoteServer::Config::materialCatalogPath` and pass into `RemoteSession` or `RemoteServer` so the catalog is available at start.
+	* Reuse `MaterialStorage::storeMaterial` validation by adding a light-weight `MaterialStorage::validateDocumentFromPath()` helper that reads & validates a file and returns `StoredDocument` metadata without copying bytes into session workspace (catalog entries may reference original path).
+	* Keep `POST /material` semantics unchanged; implement `POST /materials/select` as described and reuse the existing enqueue/load logic to activate materials.
+
+This makes server-side materials first-class, offers a clean supply & verify model for the Python client, and implements a simple session selection model that `POST /reset` can later use to revert to catalog baseline.
 Alignment With MaterialX/main
 ------------------------------
 - Material cataloging: upstream `MaterialXView` still loads a single document per launch; no built-in manifest or directory scan exists. We must add the catalog loader layer described in the plan.

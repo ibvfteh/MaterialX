@@ -93,6 +93,21 @@ bool GlslMaterial::generateShader(ShaderPtr hwShader)
     return true;
 }
 
+bool GlslMaterial::setProgramStages(const std::string& vertexSource, const std::string& pixelSource)
+{
+    // Create a new program and set the provided stages
+    auto program = GlslProgram::create();
+    program->addStage(Stage::VERTEX, vertexSource);
+    program->addStage(Stage::PIXEL, pixelSource);
+
+    // Attempt to build to validate compilation/linking
+    program->build();
+
+    // On success, replace our internal program
+    _glProgram = program;
+    return true;
+}
+
 bool GlslMaterial::bindShader() const
 {
     if (!_glProgram)

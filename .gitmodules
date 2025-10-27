@@ -11,3 +11,6 @@
 	path = source/MaterialXRemote/External/cpp-httplib
 	url = https://github.com/yhirose/cpp-httplib.git
 	branch = v0.26.0
+[submodule "source/MaterialXRemote/External/jsoncpp"]
+	path = source/MaterialXRemote/External/jsoncpp
+	url = https://github.com/open-source-parsers/jsoncpp.git

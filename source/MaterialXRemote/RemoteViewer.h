@@ -10,6 +10,8 @@
 #include <MaterialXRender/Util.h>
 #include <MaterialXFormat/File.h>
 #include <MaterialXCore/Library.h>
+#include <MaterialXRemote/Types.h>
+#include <json/json.h>
 
 #include <string>
 
@@ -27,8 +29,8 @@ class RemoteViewer : public ::Viewer
         std::string materialFilename;
         std::string meshFilename;
         std::string envRadianceFilename;
-  mx::FileSearchPath searchPath;
-  mx::FilePathVec libraryFolders;
+        mx::FileSearchPath searchPath;
+        mx::FilePathVec libraryFolders;
         int screenWidth = 1280;
         int screenHeight = 960;
         mx::Color3 screenColor = mx::DEFAULT_SCREEN_COLOR_SRGB;
@@ -39,6 +41,11 @@ class RemoteViewer : public ::Viewer
     ~RemoteViewer() override = default;
 
     void initializeRemote();
+
+  // Apply a shader package (vertex/fragment stage sources) to the currently
+  // selected material. This compiles the provided stages into the material's
+  // program on the render thread and returns a JSON diagnostics object.
+  Json::Value applyShaderPackage(const ShaderPackage& pkg);
 
     bool isHeadless() const { return _options.headless; }
 

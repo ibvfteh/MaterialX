@@ -108,6 +108,11 @@ class MX_RENDERGLSL_API GlslMaterial : public ShaderMaterial
                        ConstValuePtr value,
                        std::string valueString = EMPTY_STRING) override;
 
+  /// Set GLSL program stages (vertex and pixel) directly from source strings.
+  /// This will replace the internal program and attempt to build it. Throws
+  /// ExceptionRenderError on GLSL compile/link failure.
+  bool setProgramStages(const std::string& vertexSource, const std::string& pixelSource);
+
   protected:
     void clearShader() override;
 

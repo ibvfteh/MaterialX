@@ -7,19 +7,21 @@
 #define MATERIALXREMOTE_REMOTESESSION_H
 
 #include <MaterialXRemote/RemoteViewer.h>
+#include <MaterialXRemote/Types.h>
 
 #include <nanogui/common.h>
 
 #include <condition_variable>
 #include <future>
-#include <functional>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
 #include <type_traits>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 MATERIALX_NAMESPACE_BEGIN
 
@@ -44,6 +46,19 @@ class RemoteSession
 
     bool isRunning() const;
 
+    // Session material APIs: select by existing filesystem path (catalog selection).
+    // The session will only remember the file path (and name); it will not copy the file.
+    SessionMaterial selectMaterialFromPath(const std::string& filePath);
+    bool hasSessionMaterial() const;
+    SessionMaterial currentSessionMaterial() const;
+    void clearSessionMaterial();
+
+    // Shader package helpers (stored in-session): simple vertex/fragment stage text.
+    void setShaderPackage(const ShaderPackage& o);
+    ShaderPackage getShaderPackage() const;
+    void clearShaderPackage();
+
+
     template<typename Callable>
     auto enqueue(Callable&& callable)
         -> std::future<typename std::invoke_result_t<Callable, RemoteViewer&>>;
@@ -67,6 +82,8 @@ class RemoteSession
     std::shared_ptr<std::promise<void>> _startupPromise;
     std::future<void> _startupFuture;
     std::exception_ptr _renderThreadException;
+    SessionMaterial _sessionMaterial;
+    ShaderPackage _shaderOverride;
 };
 
 inline RemoteSession::RemoteSession() : RemoteSession(Config{})
@@ -83,6 +100,24 @@ inline bool RemoteSession::isRunning() const
 {
     std::lock_guard<std::mutex> lock(_stateMutex);
     return _state == State::Running;
+}
+
+inline void RemoteSession::setShaderPackage(const ShaderPackage& o)
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    _shaderOverride = o;
+}
+
+inline ShaderPackage RemoteSession::getShaderPackage() const
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    return _shaderOverride;
+}
+
+inline void RemoteSession::clearShaderPackage()
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    _shaderOverride = ShaderPackage();
 }
 
 template<typename Callable>

@@ -108,18 +108,6 @@ class Viewer : public ng::Screen
         _lightHandler->setEnvSampleCount(count);
     }
 
-    // Set the environment light intensity.
-    void setEnvLightIntensity(float intensity)
-    {
-        _lightHandler->setEnvLightIntensity(intensity);
-    }
-
-    // Set the rotation of the lighting environment about the Y axis.
-    void setLightRotation(float rotation)
-    {
-        _lightRotation = rotation;
-    }
-
     // Enable or disable shadow maps.
     void setShadowMapEnable(bool enable)
     {
@@ -183,6 +171,93 @@ class Viewer : public ng::Screen
     {
         return _window;
     }
+
+    // Public wrapper to load a MaterialX document using the viewer's
+    // existing internal loadDocument implementation. This allows external
+    // users (e.g. RemoteViewer) to request a document load on the render
+    // thread without duplicating Viewer logic.
+    void loadDocumentFromFile(const mx::FilePath& filename)
+    {
+        loadDocument(filename, _stdLib);
+    }
+
+    // Geometry accessors for remote control
+    std::vector<std::string> listGeometry() const
+    {
+        std::vector<std::string> result;
+        for (const mx::MeshPartitionPtr& part : _geometryList)
+        {
+            std::string id = part->getName();
+            // append source names if present
+            const auto& sources = part->getSourceNames();
+            if (!sources.empty())
+            {
+                id += ":";
+                bool first = true;
+                for (const std::string& s : sources)
+                {
+                    if (!first) id += ",";
+                    id += s;
+                    first = false;
+                }
+            }
+            result.push_back(id);
+        }
+        return result;
+    }
+
+    std::string getActiveGeometryId() const
+    {
+        if (_selectedGeom < _geometryList.size())
+        {
+            return _geometryList[_selectedGeom]->getName();
+        }
+        return std::string();
+    }
+
+    void setActiveGeometryById(const std::string& id)
+    {
+        for (size_t i = 0; i < _geometryList.size(); ++i)
+        {
+            if (_geometryList[i]->getName() == id)
+            {
+                _selectedGeom = i;
+                updateMaterialSelections();
+                updateMaterialSelectionUI();
+                return;
+            }
+        }
+        throw std::runtime_error("Geometry id not found: " + id);
+    }
+
+    // Light accessors
+    std::string getEnvRadianceFilename() const { return _envRadianceFilename.asString(); }
+    void setEnvRadianceFilename(const mx::FilePath& fp)
+    {
+        _envRadianceFilename = fp;
+        loadEnvironmentLight();
+    }
+
+    float getEnvLightIntensity() const { return _lightHandler ? _lightHandler->getEnvLightIntensity() : 1.0f; }
+    void setEnvLightIntensity(float intensity)
+    {
+        if (_lightHandler)
+        {
+            _lightHandler->setEnvLightIntensity(intensity);
+        }
+    }
+
+    float getLightRotation() const { return _lightRotation; }
+    void setLightRotation(float rotation)
+    {
+        _lightRotation = rotation;
+    }
+
+    // Camera accessors
+    mx::Vector3 getCameraPosition() const { return _cameraPosition; }
+    mx::Vector3 getCameraTarget() const { return _cameraTarget; }
+    float getCameraViewAngle() const { return _cameraViewAngle; }
+    float getCameraZoom() const { return _cameraZoom; }
 
     // Return the active image handler.
     mx::ImageHandlerPtr getImageHandler() const

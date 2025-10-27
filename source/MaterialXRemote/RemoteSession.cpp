@@ -7,6 +7,8 @@
 
 #include <nanogui/common.h>
 
+#include <filesystem>
+
 #include <stdexcept>
 #include <utility>
 #include <exception>
@@ -118,6 +120,46 @@ void RemoteSession::stop()
     _viewer.reset();
     _state = State::Idle;
     _startupPromise.reset();
+}
+
+// Session material storage (in-memory): only keep file path and name.
+// No file copies are made.
+SessionMaterial RemoteSession::selectMaterialFromPath(const std::string& filePath)
+{
+    SessionMaterial sm;
+    sm.filePath = filePath;
+    // Populate name from the file path base name for convenience
+    try
+    {
+        std::filesystem::path p(filePath);
+        sm.name = p.filename().u8string();
+    }
+    catch (...) { sm.name = std::string(); }
+
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        _sessionMaterial = sm;
+    }
+
+    return sm;
+}
+
+bool RemoteSession::hasSessionMaterial() const
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    return !_sessionMaterial.filePath.empty() || !_sessionMaterial.name.empty();
+}
+
+SessionMaterial RemoteSession::currentSessionMaterial() const
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    return _sessionMaterial;
+}
+
+void RemoteSession::clearSessionMaterial()
+{
+    std::lock_guard<std::mutex> lock(_stateMutex);
+    _sessionMaterial = SessionMaterial();
 }
 
 void RemoteSession::renderLoop(std::shared_ptr<std::promise<void>> startupPromise)
