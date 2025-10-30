@@ -31,16 +31,21 @@ POST /materials/select
 - Behavior: enqueues document load on render thread, then captures canonical generated shader stages and stores them in-session.
 - Response: { "name":..., "filePath":... }
 
+
 GET /shader
 - Purpose: return shader stages for the currently selected material.
 - Behavior: if a session shader override exists it is merged with generated stages so missing stages are filled by generated code.
 - Response: { "stages": { "vertex": "...", "fragment": "..." } } or { "error": "..." }
 
-POST /shader
-- Body: { "vertex": "...", "fragment": "..." } or { "clear": true }
-- Purpose: persist a session shader override package (vertex/fragment strings).
-- Important: This endpoint stores the override only — it does not compile or apply it. Clients should call POST /render to build and run the program.
-- Response: { "stages": { ... }, "status": "stored" } or { "status": "cleared" }
+POST /shader/validate
+- Body: { "vertex": "...", "fragment": "..." } (partial stages allowed)
+- Purpose: compile/link a candidate shader on the render thread without changing session state. When a stage is omitted in the candidate, the server merges the missing stage from the generated canonical stage for the selected material before compiling.
+- Response: diagnostics JSON returned by the render-thread helper (e.g., { "status": "ok" } or { "status": "error", "errors": [...] }).
+
+POST /shader/store
+- Body: { "vertex": "...", "fragment": "..." }
+- Purpose: persist a session shader override package (vertex/fragment strings). This handler only stores the supplied non-empty stages into the session shader package. Validation is intentionally a separate step via POST /shader/validate.
+- Response: { "stages": { ... }, "status": "stored" }
 
 POST /shader/reset
 - Purpose: restore the session ShaderPackage to the canonical generated shader for the currently selected material.
@@ -65,6 +70,17 @@ POST /render
     - dtype: currently "float32" (server repacks GPU readback into tightly-packed float32 RGB for fidelity)
     - byteLength: exact size in bytes of the binary part for that frame
 - Binary parts: ordered to match frames_info; clients should use frames_info to decode shapes and dtypes.
+
+POST /render/stateless
+- Body: {
+    "stages": { "vertex": "...", "fragment": "..." },
+    "uniforms": [ { "path": "...", "value": "..." }, ... ],
+    "frames": N, "width": W, "height": H, "warmup": M
+  }
+- Purpose: perform a stateless render using inline shader stages and uniforms. The request is compiled and applied only for the duration of the render and the server will attempt to restore the prior shader/uniform state afterwards. This avoids mutating session-level state and enables safe parallel evaluations.
+- Behavior: merges omitted stages with generated canonical stages for the selected material; compiles and applies the program; applies inline uniforms; renders frames; restores prior shader/uniform state (best-effort).
+- Response: multipart/mixed identical format to POST /render (first part: JSON metadata; subsequent parts: raw frame buffers matching frames_info).
+- Notes: Requires a selected session material; the endpoint does not persist any shader or uniform changes across requests.
 
 GET /geometry
 - Purpose: list available mesh partitions and the active geometry id.
@@ -104,7 +120,7 @@ POST /uniforms
 
 Implementation notes and caveats
 - Synchronous behavior: most endpoints that affect or read GL/shader/program state enqueue a function to the render thread and wait for the future to complete. This makes requests blocking but simple for clients.
-- Shader application: POST /shader persists overrides but does not compile or apply them. Use POST /render (which compiles and executes) to exercise shader changes.
+-- Shader application: persist overrides with POST /shader/store (persist-only). Use POST /shader/validate to compile/validate candidate stages without modifying session state. Use POST /render to compile/apply and render frames.
 - Frame fidelity: server repacks readback into tightly-packed float32 RGB frames for lossless comparisons. Clients must respect frames_info dtype/shape for correct decoding.
 - All operations must run on the render thread — do not attempt direct GL or MaterialX calls from server threads in other code paths.
 

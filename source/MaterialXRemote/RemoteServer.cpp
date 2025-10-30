@@ -385,55 +385,101 @@ void RemoteServer::Impl::registerRoutes()
         }
     });
 
-    // Shader override endpoint: set or clear in-session shader source overrides.
-    _server->Post("/shader", [this](const httplib::Request& req, httplib::Response& res) {
+    // (Deprecated) original POST /shader removed — use /shader/store and /shader/validate
+
+    // Validate shader candidate: merge provided stages with session/package/generated
+    // stages and attempt to compile/link on the render thread. Returns diagnostics.
+    _server->Post("/shader/validate", [this](const httplib::Request& req, httplib::Response& res) {
+        try
+        {
+            // Start from session package
+            ShaderPackage sessionPkg = _session->getShaderPackage();
+
+            // If request includes transient stages, merge into session candidate
+            if (!req.body.empty())
+            {
+                Json::CharReaderBuilder reader; Json::Value body; std::string errs; std::istringstream iss(req.body);
+                if (!Json::parseFromStream(reader, iss, &body, &errs)) { res.status = 400; res.set_content(errs, "text/plain"); return; }
+                if (body.isMember("vertex") && body["vertex"].isString())
+                {
+                    const std::string v = trim(body["vertex"].asString());
+                    if (!v.empty()) sessionPkg.vertex = v;
+                }
+                if (body.isMember("fragment") && body["fragment"].isString())
+                {
+                    const std::string f = trim(body["fragment"].asString());
+                    if (!f.empty()) sessionPkg.fragment = f;
+                }
+            }
+
+            // Enqueue validation/compile on render thread
+            auto future = _session->enqueue([sessionPkg](RemoteViewer& viewer) {
+                Json::Value out(Json::objectValue);
+
+                mx::MaterialPtr material = viewer.getSelectedMaterial();
+                if (!material)
+                {
+                    out["error"] = "No selected material available";
+                    return out;
+                }
+
+                mx::ShaderPtr shader = material->getShader();
+                if (!shader)
+                {
+                    out["error"] = "Shader not generated for selected material";
+                    return out;
+                }
+
+                ShaderPackage finalPkg = sessionPkg;
+                const std::string genVertex = shader->getSourceCode(mx::Stage::VERTEX);
+                const std::string genFragment = shader->getSourceCode(mx::Stage::PIXEL);
+                if (finalPkg.vertex.empty()) finalPkg.vertex = genVertex;
+                if (finalPkg.fragment.empty()) finalPkg.fragment = genFragment;
+
+                return viewer.applyShaderPackage(finalPkg);
+            });
+
+            Json::Value response = future.get(); Json::StreamWriterBuilder builder; builder["indentation"] = "";
+            res.status = 200; res.set_content(Json::writeString(builder, response), "application/json");
+        }
+        catch (const std::exception& ex)
+        {
+            res.status = 500; res.set_content(ex.what(), "text/plain");
+        }
+    });
+
+    // Store shader override: persist the provided vertex/fragment into the session override.
+    // This handler *only* persists supplied non-empty stages; validation is done via
+    // /shader/validate if desired.
+    _server->Post("/shader/store", [this](const httplib::Request& req, httplib::Response& res) {
         try
         {
             Json::CharReaderBuilder reader; Json::Value body; std::string errs; std::istringstream iss(req.body);
             if (!Json::parseFromStream(reader, iss, &body, &errs)) { res.status = 400; res.set_content(errs, "text/plain"); return; }
 
-            if (body.isMember("clear") && body["clear"].asBool())
-            {
-                _session->clearShaderPackage();
-                Json::Value out; out["status"] = "cleared"; Json::StreamWriterBuilder builder; builder["indentation"] = "";
-                res.status = 200; res.set_content(Json::writeString(builder, out), "application/json");
-                return;
-            }
-
-            // Merge updates into existing override, only updating non-empty trimmed fields.
-                ShaderPackage current = _session->getShaderPackage();
+            // Merge updates into existing override
+            ShaderPackage candidate = _session->getShaderPackage();
             bool updated = false;
-
             if (body.isMember("vertex") && body["vertex"].isString())
             {
                 const std::string newV = trim(body["vertex"].asString());
-                if (!newV.empty())
-                {
-                    current.vertex = newV;
-                    updated = true;
-                }
+                if (!newV.empty()) { candidate.vertex = newV; updated = true; }
             }
-
             if (body.isMember("fragment") && body["fragment"].isString())
             {
                 const std::string newF = trim(body["fragment"].asString());
-                if (!newF.empty())
-                {
-                    current.fragment = newF;
-                    updated = true;
-                }
+                if (!newF.empty()) { candidate.fragment = newF; updated = true; }
             }
 
             if (!updated)
             {
-                res.status = 400; res.set_content("Missing non-empty 'vertex' or 'fragment' or use 'clear' to reset", "text/plain");
+                res.status = 400; res.set_content("Missing non-empty 'vertex' or 'fragment'", "text/plain");
                 return;
             }
 
-            // Persist package in session
-            _session->setShaderPackage(current);
-            // Persist only: do not compile/apply here. Clients should call /render to build and exercise the program.
-            Json::Value out; Json::Value stages(Json::objectValue); stages["vertex"] = current.vertex; stages["fragment"] = current.fragment; out["stages"] = stages; out["status"] = "stored"; Json::StreamWriterBuilder builder; builder["indentation"] = "";
+            // Persist the override in-session (no validation performed here)
+            _session->setShaderPackage(candidate);
+            Json::Value out; Json::Value stages(Json::objectValue); stages["vertex"] = candidate.vertex; stages["fragment"] = candidate.fragment; out["stages"] = stages; out["status"] = "stored"; Json::StreamWriterBuilder builder; builder["indentation"] = "";
             res.status = 200; res.set_content(Json::writeString(builder, out), "application/json");
         }
         catch (const std::exception& ex)
@@ -441,6 +487,8 @@ void RemoteServer::Impl::registerRoutes()
             res.status = 500; res.set_content(ex.what(), "text/plain");
         }
     });
+
+    // (Deprecated) original POST /compile removed — use /shader/validate
 
     // Render endpoint: compile current session shader package, render frames and return multipart/mixed
     _server->Post("/render", [this](const httplib::Request& req, httplib::Response& res) {
@@ -508,6 +556,90 @@ void RemoteServer::Impl::registerRoutes()
             const std::string contentType = std::string("multipart/mixed; boundary=") + boundary;
             res.status = 200;
             res.set_content(body, contentType.c_str());
+        }
+        catch (const std::exception& ex)
+        {
+            res.status = 500; res.set_content(ex.what(), "text/plain");
+        }
+    });
+
+    // Stateless render endpoint: accept shader stages and uniform overrides inline
+    // in the request and perform a render without mutating session-level state.
+    // Body: { "stages": { "vertex": "...", "fragment": "..." },
+    //         "uniforms": [ { "path": "...", "value": "..." }, ... ],
+    //         "frames": N, "width": W, "height": H, "warmup": M }
+    _server->Post("/render/stateless", [this](const httplib::Request& req, httplib::Response& res) {
+        try
+        {
+            unsigned int frames = 1u;
+            unsigned int width = 128u;
+            unsigned int height = 128u;
+            unsigned int warmup = 0u;
+
+            // Parse body if present
+            Json::Value body(Json::objectValue);
+            if (!req.body.empty())
+            {
+                Json::CharReaderBuilder reader; std::string errs; std::istringstream iss(req.body);
+                if (!Json::parseFromStream(reader, iss, &body, &errs)) { res.status = 400; res.set_content(errs, "text/plain"); return; }
+                if (body.isMember("frames")) frames = body["frames"].asUInt();
+                if (body.isMember("width")) width = body["width"].asUInt();
+                if (body.isMember("height")) height = body["height"].asUInt();
+                if (body.isMember("warmup")) warmup = body["warmup"].asUInt();
+            }
+
+            // Capture candidate stages from request if provided
+            ShaderPackage candidatePkg;
+            if (body.isMember("stages") && body["stages"].isObject())
+            {
+                const Json::Value& stages = body["stages"];
+                if (stages.isMember("vertex") && stages["vertex"].isString()) candidatePkg.vertex = stages["vertex"].asString();
+                if (stages.isMember("fragment") && stages["fragment"].isString()) candidatePkg.fragment = stages["fragment"].asString();
+            }
+
+            // Capture uniform overrides from request if provided
+            Json::Value uniformsPayload(Json::arrayValue);
+            if (body.isMember("uniforms") && body["uniforms"].isArray()) uniformsPayload = body["uniforms"];
+
+            using RenderResult = std::pair<Json::Value, std::vector<std::string>>;
+
+            auto future = _session->enqueue([candidatePkg, uniformsPayload, frames, width, height, warmup](RemoteViewer& viewer) -> RenderResult {
+                // Delegate stateless render work to RemoteViewer to avoid needing
+                // direct access to protected Viewer internals from the server.
+                return viewer.renderStateless(candidatePkg, uniformsPayload, frames, width, height, warmup);
+            });
+
+            RenderResult result = future.get();
+
+            // Build multipart/mixed response body (same format as /render)
+            Json::StreamWriterBuilder jbuilder; jbuilder["indentation"] = "";
+            const std::string metadataStr = Json::writeString(jbuilder, result.first);
+            const std::string boundary = "MX_BOUNDARY_STATeless_" + std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count());
+            std::string outBody;
+            auto appendLine = [&outBody](const std::string& s) { outBody.append(s); outBody.append("\r\n"); };
+
+            appendLine("--" + boundary);
+            appendLine("Content-Type: application/json; charset=utf-8");
+            appendLine("");
+            outBody.append(metadataStr);
+            outBody.append("\r\n");
+
+            for (size_t i = 0; i < result.second.size(); ++i)
+            {
+                const std::string& img = result.second[i];
+                appendLine("--" + boundary);
+                appendLine("Content-Type: application/octet-stream");
+                appendLine(std::string("Content-Disposition: attachment; filename=\"frame_") + std::to_string(i) + ".raw\"");
+                appendLine(std::string("Content-Length: ") + std::to_string(img.size()));
+                appendLine("");
+                outBody.append(img.data(), img.size());
+                outBody.append("\r\n");
+            }
+
+            appendLine("--" + boundary + "--");
+            const std::string contentType = std::string("multipart/mixed; boundary=") + boundary;
+            res.status = 200;
+            res.set_content(outBody, contentType.c_str());
         }
         catch (const std::exception& ex)
         {

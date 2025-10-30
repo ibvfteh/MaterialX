@@ -372,4 +372,280 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderAndCapture(
     return { meta, images };
 }
 
+std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(const ShaderPackage& candidatePkg,
+                                                                               const Json::Value& uniformsPayload,
+                                                                               unsigned int frames,
+                                                                               unsigned int width,
+                                                                               unsigned int height,
+                                                                               unsigned int warmup)
+{
+    Json::Value meta(Json::objectValue);
+    std::vector<std::string> images;
+
+    // Ensure we have a selected material
+    mx::MaterialPtr material = getSelectedMaterial();
+    if (!material)
+    {
+        meta["error"] = "No selected material available";
+        return { meta, images };
+    }
+
+    // Only GLSL pipeline supported here
+    try
+    {
+        auto glslMaterial = std::dynamic_pointer_cast<mx::GlslMaterial>(material);
+        if (!glslMaterial)
+        {
+            meta["error"] = "Selected material is not a GLSL material";
+            return { meta, images };
+        }
+
+        // Save original shader sources (if any) to restore later
+        std::string origVertex;
+        std::string origFragment;
+        mx::ShaderPtr origShader = material->getShader();
+        if (origShader)
+        {
+            origVertex = origShader->getSourceCode(mx::Stage::VERTEX);
+            origFragment = origShader->getSourceCode(mx::Stage::PIXEL);
+        }
+
+        // Save original uniform valueStrings for public uniforms
+        std::vector<std::pair<std::string, std::string>> savedUniforms;
+        const mx::VariableBlock* publicUniforms = material->getPublicUniforms();
+        if (publicUniforms)
+        {
+            for (const auto& u : publicUniforms->getVariableOrder())
+            {
+                if (!material->findUniform(u->getPath())) continue;
+                std::string val;
+                if (u->getValue()) val = u->getValue()->getValueString();
+                savedUniforms.emplace_back(u->getPath(), val);
+            }
+        }
+
+        // Determine generated stages to merge missing candidate stages
+        mx::ShaderPtr shader = material->getShader();
+        if (!shader)
+        {
+            meta["error"] = "Shader not generated for selected material";
+            return { meta, images };
+        }
+        const std::string genVertex = shader->getSourceCode(mx::Stage::VERTEX);
+        const std::string genFragment = shader->getSourceCode(mx::Stage::PIXEL);
+
+        ShaderPackage finalPkg = candidatePkg;
+        if (finalPkg.vertex.empty()) finalPkg.vertex = genVertex;
+        if (finalPkg.fragment.empty()) finalPkg.fragment = genFragment;
+
+        // Compile/apply the candidate program (may throw on compile error)
+        try
+        {
+            glslMaterial->setProgramStages(finalPkg.vertex, finalPkg.fragment);
+        }
+        catch (const mx::ExceptionRenderError& e)
+        {
+            Json::Value errors(Json::arrayValue);
+            for (const std::string& err : e.errorLog()) errors.append(err);
+            meta["status"] = "compile_error";
+            meta["errors"] = errors;
+            return { meta, images };
+        }
+
+        // Apply inline uniforms (if any)
+        if (uniformsPayload.isArray() && uniformsPayload.size() > 0)
+        {
+            for (const Json::Value& entry : uniformsPayload)
+            {
+                std::string path;
+                std::string valueStr;
+                if (entry.isMember("path")) path = entry["path"].asString();
+                else if (entry.isMember("name")) path = entry["name"].asString();
+                if (entry.isMember("value")) valueStr = entry["value"].asString();
+                if (path.empty()) continue;
+                mx::ShaderPort* uniform = material->findUniform(path);
+                if (!uniform) continue;
+                try
+                {
+                    mx::ValuePtr v = mx::Value::createValueFromStrings(valueStr, uniform->getType().getName());
+                    material->modifyUniform(path, v, valueStr);
+                }
+                catch (...) { /* ignore invalid uniform sets for stateless render */ }
+            }
+        }
+
+        // Now perform render frames using the existing protected methods
+        set_size(nanogui::Vector2i((int) width, (int) height));
+
+        for (unsigned int i = 0; i < warmup; ++i)
+        {
+            updateCameras(); clear(); invalidateShadowMap(); draw_contents();
+        }
+
+        std::vector<double> timings;
+        for (unsigned int f = 0; f < frames; ++f)
+        {
+            auto start = std::chrono::high_resolution_clock::now();
+            updateCameras(); clear(); invalidateShadowMap(); draw_contents();
+
+            mx::ImagePtr img = getRenderPipeline()->getFrameImage();
+            if (img)
+            {
+                const unsigned int iw = img->getWidth();
+                const unsigned int ih = img->getHeight();
+                const unsigned int ich = img->getChannelCount();
+                const auto baseType = img->getBaseType();
+                std::vector<float> packed; packed.resize((size_t)iw * ih * 3);
+                const unsigned int rowStride = img->getRowStride();
+                void* resBuf = img->getResourceBuffer();
+                auto writePixel = [&](unsigned int x, unsigned int y, float r, float g, float b) {
+                    size_t idx = (size_t)(y * iw + x) * 3; packed[idx+0]=r; packed[idx+1]=g; packed[idx+2]=b; };
+
+                if (baseType == mx::Image::BaseType::UINT8)
+                {
+                    for (unsigned int y=0;y<ih;++y)
+                    {
+                        uint8_t* row = reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(resBuf) + (size_t)y * rowStride);
+                        for (unsigned int x=0;x<iw;++x)
+                        {
+                            uint8_t c0 = ich>0?row[x*ich+0]:0; uint8_t c1 = ich>1?row[x*ich+1]:c0; uint8_t c2 = ich>2?row[x*ich+2]:c0;
+                            writePixel(x,y,c0/255.0f,c1/255.0f,c2/255.0f);
+                        }
+                    }
+                }
+                else if (baseType == mx::Image::BaseType::UINT16)
+                {
+                    const float scale = 1.0f/(float)std::numeric_limits<uint16_t>::max();
+                    for (unsigned int y=0;y<ih;++y)
+                    {
+                        uint16_t* row = reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(resBuf) + (size_t)y * rowStride);
+                        for (unsigned int x=0;x<iw;++x)
+                        {
+                            uint16_t c0 = ich>0?row[x*ich+0]:0; uint16_t c1 = ich>1?row[x*ich+1]:c0; uint16_t c2 = ich>2?row[x*ich+2]:c0;
+                            writePixel(x,y,c0*scale,c1*scale,c2*scale);
+                        }
+                    }
+                }
+                else if (baseType == mx::Image::BaseType::FLOAT)
+                {
+                    for (unsigned int y=0;y<ih;++y)
+                    {
+                        float* row = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(resBuf) + (size_t)y * rowStride);
+                        for (unsigned int x=0;x<iw;++x)
+                        {
+                            float c0 = ich>0?row[x*ich+0]:0.0f; float c1 = ich>1?row[x*ich+1]:c0; float c2 = ich>2?row[x*ich+2]:c0;
+                            writePixel(x,y,c0,c1,c2);
+                        }
+                    }
+                }
+                else if (baseType == mx::Image::BaseType::HALF)
+                {
+                    for (unsigned int y=0;y<ih;++y)
+                    {
+                        mx::Half* row = reinterpret_cast<mx::Half*>(reinterpret_cast<uint8_t*>(resBuf) + (size_t)y * rowStride);
+                        for (unsigned int x=0;x<iw;++x)
+                        {
+                            float c0 = ich>0?float(row[x*ich+0]):0.0f; float c1 = ich>1?float(row[x*ich+1]):c0; float c2 = ich>2?float(row[x*ich+2]):c0;
+                            writePixel(x,y,c0,c1,c2);
+                        }
+                    }
+                }
+                else
+                {
+                    for (unsigned int y=0;y<ih;++y)
+                    {
+                        uint8_t* row = reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(resBuf) + (size_t)y * rowStride);
+                        for (unsigned int x=0;x<iw;++x)
+                        {
+                            uint8_t c0 = ich>0?row[x*ich+0]:0; uint8_t c1 = ich>1?row[x*ich+1]:c0; uint8_t c2 = ich>2?row[x*ich+2]:c0;
+                            writePixel(x,y,c0/255.0f,c1/255.0f,c2/255.0f);
+                        }
+                    }
+                }
+
+                const char* p = reinterpret_cast<const char*>(packed.data());
+                images.emplace_back(p, packed.size() * sizeof(float));
+
+                Json::Value frameDesc(Json::objectValue);
+                frameDesc["index"] = (unsigned int) f;
+                frameDesc["width"] = iw;
+                frameDesc["height"] = ih;
+                frameDesc["channels"] = 3u;
+                frameDesc["dtype"] = "float32";
+                frameDesc["byteLength"] = (Json::UInt64)(packed.size() * sizeof(float));
+                frameDesc["origin"] = "bottom-left";
+                if (!meta.isMember("frames_info")) meta["frames_info"] = Json::Value(Json::arrayValue);
+                meta["frames_info"].append(frameDesc);
+            }
+            else
+            {
+                images.emplace_back();
+            }
+
+            auto end = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double, std::milli> elapsed = end - start;
+            timings.push_back(elapsed.count());
+        }
+
+        meta["status"] = "ok";
+        meta["frames"] = (unsigned int) frames;
+        if (meta.isMember("frames_info") && meta["frames_info"].isArray() && meta["frames_info"].size() > 0)
+        {
+            const Json::Value first = meta["frames_info"][0];
+            if (first.isObject() && first.isMember("width") && first.isMember("height"))
+            {
+                meta["width"] = first["width"].asUInt();
+                meta["height"] = first["height"].asUInt();
+            }
+            else
+            {
+                meta["width"] = (unsigned int) width;
+                meta["height"] = (unsigned int) height;
+            }
+        }
+        else
+        {
+            meta["width"] = (unsigned int) width;
+            meta["height"] = (unsigned int) height;
+        }
+        Json::Value tarr(Json::arrayValue);
+        for (double d : timings) tarr.append(d);
+        meta["timings_ms"] = tarr;
+
+        // Restore original shader and uniform state
+        try
+        {
+            if (!origVertex.empty() || !origFragment.empty())
+            {
+                glslMaterial->setProgramStages(origVertex, origFragment);
+            }
+            else
+            {
+                glslMaterial->setProgramStages(genVertex, genFragment);
+            }
+        }
+        catch (...) { /* best-effort restore; ignore failures */ }
+
+        for (const auto& p : savedUniforms)
+        {
+            const std::string& path = p.first; const std::string& val = p.second;
+            try
+            {
+                mx::ShaderPort* uniform = material->findUniform(path);
+                if (!uniform) continue;
+                if (val.empty()) continue;
+                mx::ValuePtr v = mx::Value::createValueFromStrings(val, uniform->getType().getName());
+                material->modifyUniform(path, v, val);
+            }
+            catch (...) { /* ignore restore errors */ }
+        }
+    }
+    catch (const std::exception& e)
+    {
+        meta["error"] = e.what();
+    }
+
+    return { meta, images };
+}
+
 MATERIALX_NAMESPACE_END

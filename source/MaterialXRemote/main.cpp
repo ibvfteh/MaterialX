@@ -36,11 +36,18 @@ int main(int argc, char** argv)
         std::string bindAddress = "0.0.0.0";
         int port = 2907;
 
+        std::string materialPath;
+        float refreshMs = 16.0f;
         for (int i = 1; i < argc; ++i)
         {
             std::string arg = argv[i];
             if (arg == "--headless")
             {
+                headless = true;
+            }
+            else if (arg == "--hideUI")
+            {
+                // alias for headless but keep semantic clarity
                 headless = true;
             }
             else if ((arg == "--bind" || arg == "-b") && i + 1 < argc)
@@ -50,6 +57,15 @@ int main(int argc, char** argv)
             else if ((arg == "--port" || arg == "-p") && i + 1 < argc)
             {
                 port = std::atoi(argv[++i]);
+            }
+            else if (arg == "--material" && i + 1 < argc)
+            {
+                materialPath = argv[++i];
+            }
+            else if (arg == "--refresh" && i + 1 < argc)
+            {
+                try { refreshMs = std::stof(argv[++i]); }
+                catch (...) { /* ignore parse errors and keep default */ }
             }
             else if (arg == "--help" || arg == "-h")
             {
@@ -63,6 +79,7 @@ int main(int argc, char** argv)
 
         RemoteSession::Config sessionConfig;
         sessionConfig.viewerOptions.headless = headless;
+        sessionConfig.refreshPeriodMs = refreshMs;
 
         std::cout << "Starting remote session (headless=" << std::boolalpha << headless << ")..." << std::endl;
 
@@ -94,6 +111,50 @@ int main(int argc, char** argv)
 
         std::cout << "Remote server listening on " << serverConfig.bindAddress << ':' << serverConfig.port << std::endl;
         std::cout << "Press Ctrl+C to exit." << std::endl;
+
+        // If a material path was provided on the command line, attempt to select
+        // and compile it into the session so the server starts with that material.
+        if (!materialPath.empty())
+        {
+            try
+            {
+                // Select material path in-session (stores path/name)
+                SessionMaterial stored = session->selectMaterialFromPath(materialPath);
+
+                // Enqueue a task on the render thread to load the document from file
+                auto loadFuture = session->enqueue([stored](RemoteViewer& viewer) {
+                    viewer.loadDocumentFromFile(mx::FilePath(stored.filePath));
+                    return Json::Value();
+                });
+                loadFuture.get();
+
+                // After loading, capture generated canonical shader stages and store them
+                auto pkgFuture = session->enqueue([](RemoteViewer& viewer) {
+                    ShaderPackage pkg;
+                    mx::MaterialPtr material = viewer.getSelectedMaterial();
+                    if (!material)
+                    {
+                        return pkg;
+                    }
+                    mx::ShaderPtr shader = material->getShader();
+                    if (!shader)
+                    {
+                        return pkg;
+                    }
+                    pkg.vertex = shader->getSourceCode(mx::Stage::VERTEX);
+                    pkg.fragment = shader->getSourceCode(mx::Stage::PIXEL);
+                    return pkg;
+                });
+                ShaderPackage canonical = pkgFuture.get();
+                session->setShaderPackage(canonical);
+
+                std::cout << "Selected material: " << stored.name << " (" << stored.filePath << ")" << std::endl;
+            }
+            catch (const std::exception& ex)
+            {
+                std::cerr << "Warning: failed to load/compile material '" << materialPath << "': " << ex.what() << std::endl;
+            }
+        }
 
         while (gShouldRun.load())
         {
