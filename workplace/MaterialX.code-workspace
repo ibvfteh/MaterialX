@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../MaterialX_amm"
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"memory": "cpp",
+			"xstring": "cpp",
+			"filesystem": "cpp"
+		}
+	}
+}

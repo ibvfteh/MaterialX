@@ -45,11 +45,6 @@ int main(int argc, char** argv)
             {
                 headless = true;
             }
-            else if (arg == "--hideUI")
-            {
-                // alias for headless but keep semantic clarity
-                headless = true;
-            }
             else if ((arg == "--bind" || arg == "-b") && i + 1 < argc)
             {
                 bindAddress = argv[++i];
@@ -84,7 +79,36 @@ int main(int argc, char** argv)
         std::cout << "Starting remote session (headless=" << std::boolalpha << headless << ")..." << std::endl;
 
         auto session = std::make_shared<RemoteSession>(sessionConfig);
-        session->start();
+        try
+        {
+            session->start();
+        }
+        catch (const std::exception& ex)
+        {
+            std::cerr << "RemoteSession failed to start (headless=" << std::boolalpha << headless << "): " << ex.what() << std::endl;
+            if (headless)
+            {
+                std::cerr << "Attempting fallback: restart session with headful (non-headless) mode..." << std::endl;
+                try
+                {
+                    // Retry with headful mode
+                    sessionConfig.viewerOptions.headless = false;
+                    session = std::make_shared<RemoteSession>(sessionConfig);
+                    session->start();
+                    std::cerr << "Fallback succeeded: running with GUI visible." << std::endl;
+                    headless = false;
+                }
+                catch (const std::exception& ex2)
+                {
+                    std::cerr << "Fallback also failed: " << ex2.what() << std::endl;
+                    return EXIT_FAILURE;
+                }
+            }
+            else
+            {
+                return EXIT_FAILURE;
+            }
+        }
 
         if (!session->isRunning())
         {
