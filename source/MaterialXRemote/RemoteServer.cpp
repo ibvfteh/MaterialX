@@ -18,7 +18,9 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <filesystem>
 #include <ctime>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -246,21 +248,60 @@ void RemoteServer::Impl::registerRoutes()
     });
 
     _server->Post("/materials/select", [this](const httplib::Request& req, httplib::Response& res) {
-        if (!_catalog)
-        {
-            res.status = 404; res.set_content("No material catalog configured", "text/plain"); return;
-        }
         try
         {
             Json::CharReaderBuilder reader; Json::Value body; std::string errs; std::istringstream iss(req.body);
             if (!Json::parseFromStream(reader, iss, &body, &errs)) { res.status = 400; res.set_content(errs, "text/plain"); return; }
-            if (!body.isMember("name")) { res.status = 400; res.set_content("Missing name", "text/plain"); return; }
-            std::string name = body["name"].asString();
-            if (!_catalog->hasEntry(name)) { res.status = 404; res.set_content("Material not found", "text/plain"); return; }
+            const std::string explicitPath = body.isMember("filePath") && body["filePath"].isString() ? body["filePath"].asString() : std::string();
+            const std::string name = body.isMember("name") ? body["name"].asString() : std::string();
 
-            const auto& entry = _catalog->getEntry(name);
-            // Select material into the session without copying files.
-            SessionMaterial stored = _session->selectMaterialFromPath(entry.filePath);
+            SessionMaterial stored;
+            bool selected = false;
+
+            // 1) Prefer explicit filePath if provided
+            if (!explicitPath.empty())
+            {
+                stored = _session->selectMaterialFromPath(explicitPath);
+                selected = true;
+            }
+            // 2) Try catalog match if available
+            else if (_catalog && !name.empty() && _catalog->hasEntry(name))
+            {
+                const auto& entry = _catalog->getEntry(name);
+                stored = _session->selectMaterialFromPath(entry.filePath);
+                selected = true;
+            }
+            // 3) Fallback to first catalog entry
+            else if (_catalog && !_catalog->entries().empty())
+            {
+                const auto& entry = _catalog->entries().front();
+                stored = _session->selectMaterialFromPath(entry.filePath);
+                selected = true;
+            }
+            // 4) Final fallback: first .mtlx under configured catalog path
+            else if (!_config.materialCatalogPath.empty())
+            {
+                namespace fs = std::filesystem;
+                fs::path root(_config.materialCatalogPath);
+                if (fs::exists(root) && fs::is_directory(root))
+                {
+                    for (const auto& p : fs::directory_iterator(root))
+                    {
+                        if (p.is_regular_file() && p.path().extension() == ".mtlx")
+                        {
+                            stored = _session->selectMaterialFromPath(p.path().string());
+                            selected = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!selected)
+            {
+                res.status = 404; res.set_content("Material not found", "text/plain"); return;
+            }
+
             // Enqueue viewer load with the original file path (viewer expects mx::FilePath)
             auto loadFuture = _session->enqueue([stored](RemoteViewer& viewer) {
                 viewer.loadDocumentFromFile(mx::FilePath(stored.filePath));
@@ -297,6 +338,66 @@ void RemoteServer::Impl::registerRoutes()
             res.status = 200; res.set_content(Json::writeString(builder, resp), "application/json");
         }
         catch (const std::exception& ex) { res.status = 500; res.set_content(ex.what(), "text/plain"); }
+    });
+
+    // Rescan the currently configured catalog folder
+    _server->Post("/materials/rescan", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!_catalog)
+        {
+            res.status = 404;
+            res.set_content("No material catalog configured", "text/plain");
+            return;
+        }
+        try
+        {
+            _catalog->scan();
+            Json::Value resp(Json::objectValue);
+            resp["status"] = "ok";
+            resp["path"] = _config.materialCatalogPath;
+            resp["count"] = (Json::UInt64)_catalog->entries().size();
+            Json::StreamWriterBuilder builder; builder["indentation"] = "";
+            res.status = 200; res.set_content(Json::writeString(builder, resp), "application/json");
+        }
+        catch (const std::exception& ex)
+        {
+            res.status = 500; res.set_content(ex.what(), "text/plain");
+        }
+    });
+
+    // Set a new catalog path and rescan
+    _server->Post("/materials/set_catalog", [this](const httplib::Request& req, httplib::Response& res) {
+        try
+        {
+            Json::CharReaderBuilder reader; Json::Value body; std::string errs; std::istringstream iss(req.body);
+            if (!Json::parseFromStream(reader, iss, &body, &errs)) { res.status = 400; res.set_content(errs, "text/plain"); return; }
+            if (!body.isMember("path") || !body["path"].isString())
+            {
+                res.status = 400; res.set_content("Missing 'path' string in body", "text/plain");
+                return;
+            }
+            const std::string path = body["path"].asString();
+            if (path.empty())
+            {
+                res.status = 400; res.set_content("Catalog path cannot be empty", "text/plain");
+                return;
+            }
+
+            auto newCatalog = std::make_unique<MaterialCatalog>(path);
+            newCatalog->scan();
+            _catalog = std::move(newCatalog);
+            _config.materialCatalogPath = path;
+
+            Json::Value resp(Json::objectValue);
+            resp["status"] = "ok";
+            resp["path"] = path;
+            resp["count"] = (Json::UInt64)_catalog->entries().size();
+            Json::StreamWriterBuilder builder; builder["indentation"] = "";
+            res.status = 200; res.set_content(Json::writeString(builder, resp), "application/json");
+        }
+        catch (const std::exception& ex)
+        {
+            res.status = 500; res.set_content(ex.what(), "text/plain");
+        }
     });
 
     _server->Get("/shader", [this](const httplib::Request& req, httplib::Response& res) {
@@ -413,6 +514,7 @@ void RemoteServer::Impl::registerRoutes()
             }
 
             // Enqueue validation/compile on render thread
+            auto queueStart = std::chrono::high_resolution_clock::now();
             auto future = _session->enqueue([sessionPkg](RemoteViewer& viewer) {
                 Json::Value out(Json::objectValue);
 
@@ -439,7 +541,12 @@ void RemoteServer::Impl::registerRoutes()
                 return viewer.applyShaderPackage(finalPkg);
             });
 
-            Json::Value response = future.get(); Json::StreamWriterBuilder builder; builder["indentation"] = "";
+            Json::Value response = future.get();
+            auto queueEnd = std::chrono::high_resolution_clock::now();
+            const double queueMs = std::chrono::duration<double, std::milli>(queueEnd - queueStart).count();
+            std::cout << "[RemoteServer] /shader/validate queue+compile_ms=" << queueMs << std::endl;
+
+            Json::StreamWriterBuilder builder; builder["indentation"] = "";
             res.status = 200; res.set_content(Json::writeString(builder, response), "application/json");
         }
         catch (const std::exception& ex)
@@ -521,6 +628,26 @@ void RemoteServer::Impl::registerRoutes()
 
             RenderResult result = future.get();
 
+            if (result.first.isMember("error"))
+            {
+                Json::StreamWriterBuilder jbuilder; jbuilder["indentation"] = "";
+                const std::string metadataStr = Json::writeString(jbuilder, result.first);
+                const std::string boundary = "MX_BOUNDARY_STATeless_" + std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count());
+                std::string outBody;
+                auto appendLine = [&outBody](const std::string& s) { outBody.append(s); outBody.append("\r\n"); };
+
+                appendLine("--" + boundary);
+                appendLine("Content-Type: application/json; charset=utf-8");
+                appendLine("");
+                outBody.append(metadataStr);
+                outBody.append("\r\n");
+                appendLine("--" + boundary + "--");
+                const std::string contentType = std::string("multipart/mixed; boundary=") + boundary;
+                res.status = 400;
+                res.set_content(outBody, contentType.c_str());
+                return;
+            }
+
             // Build multipart/mixed response body
             Json::StreamWriterBuilder jbuilder; jbuilder["indentation"] = "";
             const std::string metadataStr = Json::writeString(jbuilder, result.first);
@@ -567,14 +694,28 @@ void RemoteServer::Impl::registerRoutes()
     // in the request and perform a render without mutating session-level state.
     // Body: { "stages": { "vertex": "...", "fragment": "..." },
     //         "uniforms": [ { "path": "...", "value": "..." }, ... ],
-    //         "frames": N, "width": W, "height": H, "warmup": M }
+    //         "frames": N, "width": W, "height": H, "warmup": M,
+    //         "camera": { "position": [x,y,z], "target": [x,y,z], "viewAngle": f, "zoom": f },
+    //         "lights": { "envRadianceFilename": str, "envLightIntensity": f, "lightRotation": f } }
     _server->Post("/render/stateless", [this](const httplib::Request& req, httplib::Response& res) {
         try
         {
+            auto reqStart = std::chrono::high_resolution_clock::now();
+            auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
+
             unsigned int frames = 1u;
             unsigned int width = 128u;
             unsigned int height = 128u;
             unsigned int warmup = 0u;
+
+            // Optional overrides pulled from the request
+            bool hasCamera = false;
+            mx::Vector3 camPos; mx::Vector3 camTgt; float camViewAngle = 0.0f; float camZoom = 0.0f;
+            bool hasCamViewAngle = false; bool hasCamZoom = false;
+
+            bool hasLights = false;
+            std::string envRadiancePath; float envLightIntensity = 0.0f; float lightRotation = 0.0f;
+            bool envLightIntensitySet = false; bool hasLightRotation = false;
 
             // Parse body if present
             Json::Value body(Json::objectValue);
@@ -586,10 +727,37 @@ void RemoteServer::Impl::registerRoutes()
                 if (body.isMember("width")) width = body["width"].asUInt();
                 if (body.isMember("height")) height = body["height"].asUInt();
                 if (body.isMember("warmup")) warmup = body["warmup"].asUInt();
+
+                // Camera override if provided
+                if (body.isMember("camera") && body["camera"].isObject())
+                {
+                    const Json::Value& cam = body["camera"];
+                    if (!cam.isMember("position") || !cam["position"].isArray() || cam["position"].size() < 3) { res.status = 400; res.set_content("camera.position must be an array of 3 floats", "text/plain"); return; }
+                    if (!cam.isMember("target") || !cam["target"].isArray() || cam["target"].size() < 3) { res.status = 400; res.set_content("camera.target must be an array of 3 floats", "text/plain"); return; }
+                    camPos[0] = cam["position"][0].asFloat(); camPos[1] = cam["position"][1].asFloat(); camPos[2] = cam["position"][2].asFloat();
+                    camTgt[0] = cam["target"][0].asFloat(); camTgt[1] = cam["target"][1].asFloat(); camTgt[2] = cam["target"][2].asFloat();
+                    if (cam.isMember("viewAngle")) { camViewAngle = cam["viewAngle"].asFloat(); hasCamViewAngle = true; }
+                    if (cam.isMember("zoom")) { camZoom = cam["zoom"].asFloat(); hasCamZoom = true; }
+                    hasCamera = true;
+                }
+
+                // Lights override if provided
+                if (body.isMember("lights") && body["lights"].isObject())
+                {
+                    const Json::Value& lights = body["lights"];
+                    if (lights.isMember("envRadianceFilename"))
+                    {
+                        if (!lights["envRadianceFilename"].isString()) { res.status = 400; res.set_content("lights.envRadianceFilename must be a string", "text/plain"); return; }
+                        envRadiancePath = lights["envRadianceFilename"].asString();
+                    }
+                    if (lights.isMember("envLightIntensity")) { envLightIntensity = lights["envLightIntensity"].asFloat(); envLightIntensitySet = true; }
+                    if (lights.isMember("lightRotation")) { lightRotation = lights["lightRotation"].asFloat(); hasLightRotation = true; }
+                    hasLights = true;
+                }
             }
 
-            // Capture candidate stages from request if provided
-            ShaderPackage candidatePkg;
+            // Start from session package so an empty request renders the selected material
+            ShaderPackage candidatePkg = _session->getShaderPackage();
             if (body.isMember("stages") && body["stages"].isObject())
             {
                 const Json::Value& stages = body["stages"];
@@ -603,15 +771,53 @@ void RemoteServer::Impl::registerRoutes()
 
             using RenderResult = std::pair<Json::Value, std::vector<std::string>>;
 
-            auto future = _session->enqueue([candidatePkg, uniformsPayload, frames, width, height, warmup](RemoteViewer& viewer) -> RenderResult {
+            auto queueStart = std::chrono::high_resolution_clock::now();
+            auto future = _session->enqueue([
+                candidatePkg,
+                uniformsPayload,
+                frames,
+                width,
+                height,
+                warmup,
+                hasCamera,
+                camPos,
+                camTgt,
+                hasCamViewAngle,
+                camViewAngle,
+                hasCamZoom,
+                camZoom,
+                hasLights,
+                envRadiancePath,
+                envLightIntensitySet,
+                envLightIntensity,
+                hasLightRotation,
+                lightRotation
+            ](RemoteViewer& viewer) -> RenderResult {
+                if (hasCamera)
+                {
+                    viewer.setCameraPosition(camPos);
+                    viewer.setCameraTarget(camTgt);
+                    if (hasCamViewAngle) viewer.setCameraViewAngle(camViewAngle);
+                    if (hasCamZoom) viewer.setCameraZoom(camZoom);
+                }
+
+                if (hasLights)
+                {
+                    if (!envRadiancePath.empty()) viewer.setEnvRadianceFilename(mx::FilePath(envRadiancePath));
+                    if (envLightIntensitySet) viewer.setEnvLightIntensity(envLightIntensity);
+                    if (hasLightRotation) viewer.setLightRotation(lightRotation);
+                }
+
                 // Delegate stateless render work to RemoteViewer to avoid needing
                 // direct access to protected Viewer internals from the server.
                 return viewer.renderStateless(candidatePkg, uniformsPayload, frames, width, height, warmup);
             });
 
             RenderResult result = future.get();
+            auto queueEnd = std::chrono::high_resolution_clock::now();
 
             // Build multipart/mixed response body (same format as /render)
+            auto buildStart = std::chrono::high_resolution_clock::now();
             Json::StreamWriterBuilder jbuilder; jbuilder["indentation"] = "";
             const std::string metadataStr = Json::writeString(jbuilder, result.first);
             const std::string boundary = "MX_BOUNDARY_STATeless_" + std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count());
@@ -640,6 +846,16 @@ void RemoteServer::Impl::registerRoutes()
             const std::string contentType = std::string("multipart/mixed; boundary=") + boundary;
             res.status = 200;
             res.set_content(outBody, contentType.c_str());
+
+            auto buildEnd = std::chrono::high_resolution_clock::now();
+            auto reqEnd = std::chrono::high_resolution_clock::now();
+            std::cout << "[RemoteServer] /render/stateless handler_ms=" << ms(reqEnd - reqStart)
+                      << " queue_ms=" << ms(queueEnd - queueStart)
+                      << " build_ms=" << ms(buildEnd - buildStart)
+                      << " payload_bytes=" << outBody.size()
+                      << " frames=" << frames
+                      << " size=" << width << "x" << height
+                      << std::endl;
         }
         catch (const std::exception& ex)
         {
@@ -669,8 +885,58 @@ void RemoteServer::Impl::registerRoutes()
                     return out;
                 }
 
+                auto appendValue = [](Json::Value& item, const mx::ValuePtr& v) {
+                    if (!v)
+                    {
+                        item["value"] = Json::Value();
+                        return;
+                    }
+                    const std::string t = v->getTypeString();
+                    if (t == "float")
+                    {
+                        item["value"] = v->asA<float>();
+                    }
+                    else if (t == "integer")
+                    {
+                        item["value"] = v->asA<int>();
+                    }
+                    else if (t == "boolean")
+                    {
+                        item["value"] = v->asA<bool>();
+                    }
+                    else if (t == "color3")
+                    {
+                        auto c = v->asA<mx::Color3>();
+                        item["value"] = Json::arrayValue; item["value"].append(c[0]); item["value"].append(c[1]); item["value"].append(c[2]);
+                    }
+                    else if (t == "vector2")
+                    {
+                        auto c = v->asA<mx::Vector2>();
+                        item["value"] = Json::arrayValue; item["value"].append(c[0]); item["value"].append(c[1]);
+                    }
+                    else if (t == "vector3")
+                    {
+                        auto c = v->asA<mx::Vector3>();
+                        item["value"] = Json::arrayValue; item["value"].append(c[0]); item["value"].append(c[1]); item["value"].append(c[2]);
+                    }
+                    else if (t == "vector4")
+                    {
+                        auto c = v->asA<mx::Vector4>();
+                        item["value"] = Json::arrayValue; item["value"].append(c[0]); item["value"].append(c[1]); item["value"].append(c[2]); item["value"].append(c[3]);
+                    }
+                    else
+                    {
+                        item["value"] = v->getValueString();
+                    }
+                };
+
                 for (const auto& uniform : publicUniforms->getVariableOrder())
                 {
+                    const std::string& uname = uniform->getName();
+                    if (uname.rfind("SR_", 0) == 0)
+                    {
+                        continue;
+                    }
                     // Verify the uniform is actually present and editable in the compiled program
                     if (!material->findUniform(uniform->getPath()))
                     {
@@ -680,8 +946,8 @@ void RemoteServer::Impl::registerRoutes()
                     item["path"] = uniform->getPath();
                     item["name"] = uniform->getName();
                     item["variable"] = uniform->getVariable();
-                    item["value"] = uniform->getValue() ? uniform->getValue()->getValueString() : Json::Value();
                     item["type"] = uniform->getType().getName();
+                    appendValue(item, uniform->getValue());
                     if (!uniform->getUnit().empty()) item["unit"] = uniform->getUnit();
                     if (!uniform->getColorSpace().empty()) item["colorspace"] = uniform->getColorSpace();
                     list.append(item);

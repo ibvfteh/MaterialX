@@ -12,6 +12,7 @@
 #include <nanogui/window.h>
 // For timing
 #include <chrono>
+#include <iostream>
 
 MATERIALX_NAMESPACE_BEGIN
 namespace
@@ -89,11 +90,9 @@ Json::Value RemoteViewer::applyShaderPackage(const ShaderPackage& pkg)
         out["error"] = "No selected material available";
         return out;
     }
-
     // Only GLSL pipeline supported here
     try
     {
-        // Attempt to cast to a GLSL material; otherwise we cannot apply GLSL stages
         auto glslMaterial = std::dynamic_pointer_cast<mx::GlslMaterial>(material);
         if (!glslMaterial)
         {
@@ -381,6 +380,8 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
 {
     Json::Value meta(Json::objectValue);
     std::vector<std::string> images;
+    auto callStart = std::chrono::high_resolution_clock::now();
+    double unpackMsTotal = 0.0;
 
     // Ensure we have a selected material
     mx::MaterialPtr material = getSelectedMaterial();
@@ -410,6 +411,16 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
             origFragment = origShader->getSourceCode(mx::Stage::PIXEL);
         }
 
+        // Determine generated stages to merge missing candidate stages
+        mx::ShaderPtr shader = material->getShader();
+        if (!shader)
+        {
+            meta["error"] = "Shader not generated for selected material";
+            return { meta, images };
+        }
+        const std::string genVertex = shader->getSourceCode(mx::Stage::VERTEX);
+        const std::string genFragment = shader->getSourceCode(mx::Stage::PIXEL);
+
         // Save original uniform valueStrings for public uniforms
         std::vector<std::pair<std::string, std::string>> savedUniforms;
         const mx::VariableBlock* publicUniforms = material->getPublicUniforms();
@@ -424,21 +435,41 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
             }
         }
 
-        // Determine generated stages to merge missing candidate stages
-        mx::ShaderPtr shader = material->getShader();
-        if (!shader)
-        {
-            meta["error"] = "Shader not generated for selected material";
-            return { meta, images };
-        }
-        const std::string genVertex = shader->getSourceCode(mx::Stage::VERTEX);
-        const std::string genFragment = shader->getSourceCode(mx::Stage::PIXEL);
+        auto restoreState = [&]() {
+            try
+            {
+                if (!origVertex.empty() || !origFragment.empty())
+                {
+                    glslMaterial->setProgramStages(origVertex, origFragment);
+                }
+                else
+                {
+                    glslMaterial->setProgramStages(genVertex, genFragment);
+                }
+            }
+            catch (...) {}
+
+            for (const auto& p : savedUniforms)
+            {
+                const std::string& path = p.first; const std::string& val = p.second;
+                try
+                {
+                    mx::ShaderPort* uniform = material->findUniform(path);
+                    if (!uniform) continue;
+                    if (val.empty()) continue;
+                    mx::ValuePtr v = mx::Value::createValueFromStrings(val, uniform->getType().getName());
+                    material->modifyUniform(path, v, val);
+                }
+                catch (...) {}
+            }
+        };
 
         ShaderPackage finalPkg = candidatePkg;
         if (finalPkg.vertex.empty()) finalPkg.vertex = genVertex;
         if (finalPkg.fragment.empty()) finalPkg.fragment = genFragment;
 
         // Compile/apply the candidate program (may throw on compile error)
+        auto compileStart = std::chrono::high_resolution_clock::now();
         try
         {
             glslMaterial->setProgramStages(finalPkg.vertex, finalPkg.fragment);
@@ -451,6 +482,35 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
             meta["errors"] = errors;
             return { meta, images };
         }
+        auto compileEnd = std::chrono::high_resolution_clock::now();
+
+        auto parseFloatList = [](const std::string& s, std::vector<float>& out) -> bool {
+            std::stringstream ss(s);
+            std::string item;
+            while (std::getline(ss, item, ','))
+            {
+                std::string trimmed = mx::trimSpaces(item);
+                if (trimmed.empty()) continue;
+                try { out.push_back(std::stof(trimmed)); }
+                catch (...) { return false; }
+            }
+            return !out.empty();
+        };
+
+        auto toFloatVec = [&](const Json::Value& v, std::vector<float>& out) -> bool {
+            if (v.isArray())
+            {
+                for (const auto& e : v)
+                {
+                    if (!e.isNumeric()) return false;
+                    out.push_back(e.asFloat());
+                }
+                return !out.empty();
+            }
+            if (v.isNumeric()) { out.push_back(v.asFloat()); return true; }
+            if (v.isString()) return parseFloatList(v.asString(), out);
+            return false;
+        };
 
         // Apply inline uniforms (if any)
         if (uniformsPayload.isArray() && uniformsPayload.size() > 0)
@@ -458,19 +518,96 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
             for (const Json::Value& entry : uniformsPayload)
             {
                 std::string path;
-                std::string valueStr;
                 if (entry.isMember("path")) path = entry["path"].asString();
                 else if (entry.isMember("name")) path = entry["name"].asString();
-                if (entry.isMember("value")) valueStr = entry["value"].asString();
                 if (path.empty()) continue;
+
                 mx::ShaderPort* uniform = material->findUniform(path);
                 if (!uniform) continue;
+
+                if (!entry.isMember("value")) continue;
+                const Json::Value& val = entry["value"];
+
+                const std::string typeName = uniform->getType().getName();
+                std::vector<float> floats;
+
                 try
                 {
-                    mx::ValuePtr v = mx::Value::createValueFromStrings(valueStr, uniform->getType().getName());
-                    material->modifyUniform(path, v, valueStr);
+                    if (typeName == "float")
+                    {
+                        if (!toFloatVec(val, floats) || floats.size() != 1)
+                            throw std::runtime_error("expected float");
+                        mx::ValuePtr v = mx::Value::createValue(floats[0]);
+                        material->modifyUniform(path, v);
+                    }
+                    else if (typeName == "color3" || typeName == "vector3")
+                    {
+                        if (!toFloatVec(val, floats) || floats.size() != 3)
+                            throw std::runtime_error("expected float[3]");
+                        mx::ValuePtr v = (typeName == "color3") ?
+                            mx::Value::createValue(mx::Color3(floats[0], floats[1], floats[2])) :
+                            mx::Value::createValue(mx::Vector3(floats[0], floats[1], floats[2]));
+                        material->modifyUniform(path, v);
+                    }
+                    else if (typeName == "vector2")
+                    {
+                        if (!toFloatVec(val, floats) || floats.size() != 2)
+                            throw std::runtime_error("expected float[2]");
+                        mx::ValuePtr v = mx::Value::createValue(mx::Vector2(floats[0], floats[1]));
+                        material->modifyUniform(path, v);
+                    }
+                    else if (typeName == "vector4")
+                    {
+                        if (!toFloatVec(val, floats) || floats.size() != 4)
+                            throw std::runtime_error("expected float[4]");
+                        mx::ValuePtr v = mx::Value::createValue(mx::Vector4(floats[0], floats[1], floats[2], floats[3]));
+                        material->modifyUniform(path, v);
+                    }
+                    else if (typeName == "integer")
+                    {
+                        if (val.isNumeric())
+                        {
+                            mx::ValuePtr v = mx::Value::createValue(val.asInt());
+                            material->modifyUniform(path, v);
+                        }
+                        else if (val.isString())
+                        {
+                            floats.clear();
+                            if (!parseFloatList(val.asString(), floats) || floats.size() != 1)
+                                throw std::runtime_error("expected integer");
+                            mx::ValuePtr v = mx::Value::createValue((int)floats[0]);
+                            material->modifyUniform(path, v);
+                        }
+                        else
+                        {
+                            throw std::runtime_error("expected integer");
+                        }
+                    }
+                    else if (typeName == "boolean")
+                    {
+                        if (!val.isBool()) throw std::runtime_error("expected boolean");
+                        mx::ValuePtr v = mx::Value::createValue(val.asBool());
+                        material->modifyUniform(path, v);
+                    }
+                    else
+                    {
+                        // Fallback: try the original string-based conversion
+                        std::string valueStr = val.isString() ? val.asString() : val.toStyledString();
+                        mx::ValuePtr v = mx::Value::createValueFromStrings(valueStr, typeName);
+                        material->modifyUniform(path, v, valueStr);
+                    }
                 }
-                catch (...) { /* ignore invalid uniform sets for stateless render */ }
+                catch (const std::exception& e)
+                {
+                        restoreState();
+                        meta["error"] = std::string("uniform parse failed for ") + path + ": " + e.what();
+                    return { meta, images };
+                }
+                catch (...) {
+                    meta["error"] = std::string("uniform parse failed for ") + path;
+                        restoreState();
+                    return { meta, images };
+                }
             }
         }
 
@@ -496,6 +633,7 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
                 const unsigned int ich = img->getChannelCount();
                 const auto baseType = img->getBaseType();
                 std::vector<float> packed; packed.resize((size_t)iw * ih * 3);
+                    auto packStart = std::chrono::high_resolution_clock::now();
                 const unsigned int rowStride = img->getRowStride();
                 void* resBuf = img->getResourceBuffer();
                 auto writePixel = [&](unsigned int x, unsigned int y, float r, float g, float b) {
@@ -576,6 +714,8 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
                 frameDesc["origin"] = "bottom-left";
                 if (!meta.isMember("frames_info")) meta["frames_info"] = Json::Value(Json::arrayValue);
                 meta["frames_info"].append(frameDesc);
+                    auto packEnd = std::chrono::high_resolution_clock::now();
+                    unpackMsTotal += std::chrono::duration<double, std::milli>(packEnd - packStart).count();
             }
             else
             {
@@ -612,33 +752,21 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
         for (double d : timings) tarr.append(d);
         meta["timings_ms"] = tarr;
 
-        // Restore original shader and uniform state
-        try
-        {
-            if (!origVertex.empty() || !origFragment.empty())
-            {
-                glslMaterial->setProgramStages(origVertex, origFragment);
-            }
-            else
-            {
-                glslMaterial->setProgramStages(genVertex, genFragment);
-            }
-        }
-        catch (...) { /* best-effort restore; ignore failures */ }
+        double renderMsTotal = 0.0;
+        for (double d : timings) renderMsTotal += d;
+        auto now = std::chrono::high_resolution_clock::now();
+        auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
+        const double totalMs = ms(now - callStart);
+        const double compileMs = ms(compileEnd - compileStart);
+        std::cout << "[RemoteViewer] renderStateless timings compile_ms=" << compileMs
+                  << " render_ms=" << renderMsTotal
+                  << " unpack_ms=" << unpackMsTotal
+                  << " total_ms=" << totalMs
+                  << " frames=" << frames
+                  << " size=" << width << "x" << height
+                  << std::endl;
 
-        for (const auto& p : savedUniforms)
-        {
-            const std::string& path = p.first; const std::string& val = p.second;
-            try
-            {
-                mx::ShaderPort* uniform = material->findUniform(path);
-                if (!uniform) continue;
-                if (val.empty()) continue;
-                mx::ValuePtr v = mx::Value::createValueFromStrings(val, uniform->getType().getName());
-                material->modifyUniform(path, v, val);
-            }
-            catch (...) { /* ignore restore errors */ }
-        }
+        restoreState();
     }
     catch (const std::exception& e)
     {
