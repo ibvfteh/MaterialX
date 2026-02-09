@@ -55,7 +55,7 @@ RemoteViewer::RemoteViewer(const Options& options) :
         _options.libraryFolders = DEFAULT_LIBRARY_FOLDERS;
     }
 
-    if (_options.headless)
+    if (_options.backend != Options::Backend::GLFWWindowed)
     {
         set_visible(false);
     }
@@ -65,17 +65,17 @@ void RemoteViewer::initializeRemote()
 {
     initialize();
 
-    if (_options.headless)
+    if (_options.backend == Options::Backend::GLFWWindowed)
+    {
+        set_visible(true);
+    }
+    else
     {
         if (auto window = getWindow())
         {
             window->set_visible(false);
         }
         set_visible(false);
-    }
-    else
-    {
-        set_visible(true);
     }
 }
 

@@ -26,6 +26,13 @@ class RemoteViewer : public ::Viewer
   public:
     struct Options
     {
+      enum class Backend
+      {
+        GLFWWindowed,
+        GLFWWindowless,
+        EGLHeadless
+      };
+
         std::string materialFilename;
         std::string meshFilename;
         std::string envRadianceFilename;
@@ -34,7 +41,7 @@ class RemoteViewer : public ::Viewer
         int screenWidth = 1280;
         int screenHeight = 960;
         mx::Color3 screenColor = mx::DEFAULT_SCREEN_COLOR_SRGB;
-        bool headless = true;
+      Backend backend = Backend::GLFWWindowless;
     };
 
     explicit RemoteViewer(const Options& options);
@@ -67,7 +74,8 @@ class RemoteViewer : public ::Viewer
                                     unsigned int height,
                                     unsigned int warmup);
 
-    bool isHeadless() const { return _options.headless; }
+    Options::Backend getBackend() const { return _options.backend; }
+    bool isHeadless() const { return _options.backend != Options::Backend::GLFWWindowed; }
 
   private:
     Options _options;

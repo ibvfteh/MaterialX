@@ -32,7 +32,7 @@ int main(int argc, char** argv)
 
     try
     {
-        bool headless = false;
+        RemoteViewer::Options::Backend backend = RemoteViewer::Options::Backend::GLFWWindowed;
         std::string bindAddress = "0.0.0.0";
         int port = 2907;
 
@@ -41,9 +41,26 @@ int main(int argc, char** argv)
         for (int i = 1; i < argc; ++i)
         {
             std::string arg = argv[i];
-            if (arg == "--headless")
+            if (arg == "--backend" && i + 1 < argc)
             {
-                headless = true;
+                std::string value = argv[++i];
+                if (value == "glfw-windowed")
+                {
+                    backend = RemoteViewer::Options::Backend::GLFWWindowed;
+                }
+                else if (value == "glfw-windowless")
+                {
+                    backend = RemoteViewer::Options::Backend::GLFWWindowless;
+                }
+                else if (value == "egl-headless")
+                {
+                    backend = RemoteViewer::Options::Backend::EGLHeadless;
+                }
+                else
+                {
+                    std::cerr << "Unknown backend: " << value << "\n";
+                    return EXIT_FAILURE;
+                }
             }
             else if ((arg == "--bind" || arg == "-b") && i + 1 < argc)
             {
@@ -65,7 +82,7 @@ int main(int argc, char** argv)
             else if (arg == "--help" || arg == "-h")
             {
                 std::cout << "Usage: MaterialXRemoteServer [options]\n"
-                             "  --headless           Run without showing the viewer window\n"
+                             "  --backend <name>     Backend: glfw-windowed | glfw-windowless | egl-headless\n"
                              "  --bind <address>     Bind address (default 0.0.0.0)\n"
                              "  --port <port>        Listen port (default 2907)\n";
                 return EXIT_SUCCESS;
@@ -73,10 +90,13 @@ int main(int argc, char** argv)
         }
 
         RemoteSession::Config sessionConfig;
-        sessionConfig.viewerOptions.headless = headless;
+        sessionConfig.viewerOptions.backend = backend;
         sessionConfig.refreshPeriodMs = refreshMs;
 
-        std::cout << "Starting remote session (headless=" << std::boolalpha << headless << ")..." << std::endl;
+        std::cout << "Starting remote session (backend="
+                  << (backend == RemoteViewer::Options::Backend::GLFWWindowed ? "GLFWWindowed" :
+                      backend == RemoteViewer::Options::Backend::GLFWWindowless ? "GLFWWindowless" : "EGLHeadless")
+                  << ")..." << std::endl;
 
         auto session = std::make_shared<RemoteSession>(sessionConfig);
         try
@@ -85,29 +105,11 @@ int main(int argc, char** argv)
         }
         catch (const std::exception& ex)
         {
-            std::cerr << "RemoteSession failed to start (headless=" << std::boolalpha << headless << "): " << ex.what() << std::endl;
-            if (headless)
-            {
-                std::cerr << "Attempting fallback: restart session with headful (non-headless) mode..." << std::endl;
-                try
-                {
-                    // Retry with headful mode
-                    sessionConfig.viewerOptions.headless = false;
-                    session = std::make_shared<RemoteSession>(sessionConfig);
-                    session->start();
-                    std::cerr << "Fallback succeeded: running with GUI visible." << std::endl;
-                    headless = false;
-                }
-                catch (const std::exception& ex2)
-                {
-                    std::cerr << "Fallback also failed: " << ex2.what() << std::endl;
-                    return EXIT_FAILURE;
-                }
-            }
-            else
-            {
-                return EXIT_FAILURE;
-            }
+            std::cerr << "RemoteSession failed to start (backend="
+                      << (backend == RemoteViewer::Options::Backend::GLFWWindowed ? "GLFWWindowed" :
+                          backend == RemoteViewer::Options::Backend::GLFWWindowless ? "GLFWWindowless" : "EGLHeadless")
+                      << "): " << ex.what() << std::endl;
+            return EXIT_FAILURE;
         }
 
         if (!session->isRunning())

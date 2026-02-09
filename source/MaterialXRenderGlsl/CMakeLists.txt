@@ -1,6 +1,8 @@
 file(GLOB_RECURSE materialx_source "${CMAKE_CURRENT_SOURCE_DIR}/*.c*")
 file(GLOB_RECURSE materialx_headers "${CMAKE_CURRENT_SOURCE_DIR}/*.h*")
 
+option(MATERIALX_EGL_ONLY "Build MaterialXRenderGlsl without X11 dependencies (EGL only)" OFF)
+
 if(POLICY CMP0072)
     cmake_policy(SET CMP0072 NEW)
 endif()
@@ -9,12 +11,16 @@ if(APPLE)
     find_library(COCOA_FRAMEWORK Cocoa)
     find_package(OpenGL REQUIRED)
 elseif(UNIX)
-    find_package(X11 REQUIRED)
-    # Note - can't just require the Xt component because FindX11 in cmake 3.1
-    # doesn't support it
-    if(NOT X11_Xt_FOUND)
-        message(FATAL_ERROR "Error in building MaterialXRenderGlsl: Xt was not found")
+    if(NOT MATERIALX_EGL_ONLY)
+        find_package(X11 REQUIRED)
+        # Note - can't just require the Xt component because FindX11 in cmake 3.1
+        # doesn't support it
+        if(NOT X11_Xt_FOUND)
+            message(FATAL_ERROR "Error in building MaterialXRenderGlsl: Xt was not found")
+        endif()
     endif()
+
+    find_package(EGL REQUIRED)
 
     if(SKBUILD)
         set(OpenGL_GL_PREFERENCE LEGACY)
@@ -38,8 +44,10 @@ mx_add_library(MaterialXRenderGlsl
 if(APPLE)
     target_compile_definitions(${TARGET_NAME} PRIVATE -DGL_SILENCE_DEPRECATION)
 elseif(UNIX)
-    #TODO - public or private here?
-    target_include_directories(${TARGET_NAME} PRIVATE ${X11_INCLUDE_DIR})
+    if(NOT MATERIALX_EGL_ONLY)
+        #TODO - public or private here?
+        target_include_directories(${TARGET_NAME} PRIVATE ${X11_INCLUDE_DIR})
+    endif()
 endif()
 
 # Disable OpenGL deprecation warnings on Clang.
@@ -73,6 +81,7 @@ elseif(UNIX)
     target_link_libraries(${TARGET_NAME}
             PUBLIC
             OpenGL::GL
-            X11::X11
-            X11::Xt)
+            EGL::EGL
+            $<$<NOT:$<BOOL:${MATERIALX_EGL_ONLY}>>:X11::X11>
+            $<$<NOT:$<BOOL:${MATERIALX_EGL_ONLY}>>:X11::Xt>)
 endif()

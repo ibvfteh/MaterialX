@@ -6,6 +6,7 @@
 #include <MaterialXRemote/RemoteSession.h>
 
 #include <nanogui/common.h>
+#include <MaterialXRenderGlsl/GLUtil.h>
 
 #include <filesystem>
 
@@ -166,9 +167,19 @@ void RemoteSession::renderLoop(std::shared_ptr<std::promise<void>> startupPromis
 {
     bool nanoguiInitialized = false;
     bool startupDelivered = false;
+    EglHeadlessContext eglCtx;
+    const bool useEgl = _config.viewerOptions.backend == RemoteViewer::Options::Backend::EGLHeadless;
 
     try
     {
+        if (useEgl)
+        {
+            if (!createEglHeadlessContext(eglCtx))
+            {
+                throw std::runtime_error("Failed to initialize EGL headless context");
+            }
+        }
+
         nanogui::init();
         nanoguiInitialized = true;
 
@@ -190,6 +201,11 @@ void RemoteSession::renderLoop(std::shared_ptr<std::promise<void>> startupPromis
         if (nanoguiInitialized)
         {
             nanogui::shutdown();
+        }
+
+        if (useEgl)
+        {
+            destroyEglHeadlessContext(eglCtx);
         }
 
         {
@@ -220,6 +236,11 @@ void RemoteSession::renderLoop(std::shared_ptr<std::promise<void>> startupPromis
                 nanogui::leave();
             }
             nanogui::shutdown();
+        }
+
+        if (useEgl)
+        {
+            destroyEglHeadlessContext(eglCtx);
         }
 
         {
