@@ -7,6 +7,7 @@
 
 #include <MaterialXRemote/Types.h>
 #include <MaterialXRemote/MaterialCatalog.h>
+#include <MaterialXRender/Util.h>
 #include <fstream>
 #include <MaterialXRemote/RemoteViewer.h>
 
@@ -885,50 +886,97 @@ void RemoteServer::Impl::registerRoutes()
                     return out;
                 }
 
-                auto appendValue = [](Json::Value& item, const mx::ValuePtr& v) {
+                auto valueToJson = [](const mx::ValuePtr& v) -> Json::Value {
+                    Json::Value out;
                     if (!v)
                     {
-                        item["value"] = Json::Value();
-                        return;
+                        return out;
                     }
                     const std::string t = v->getTypeString();
                     if (t == "float")
                     {
-                        item["value"] = v->asA<float>();
+                        out = v->asA<float>();
                     }
                     else if (t == "integer")
                     {
-                        item["value"] = v->asA<int>();
+                        out = v->asA<int>();
                     }
                     else if (t == "boolean")
                     {
-                        item["value"] = v->asA<bool>();
+                        out = v->asA<bool>();
                     }
                     else if (t == "color3")
                     {
                         auto c = v->asA<mx::Color3>();
-                        item["value"] = Json::arrayValue; item["value"].append(c[0]); item["value"].append(c[1]); item["value"].append(c[2]);
+                        out = Json::arrayValue; out.append(c[0]); out.append(c[1]); out.append(c[2]);
                     }
                     else if (t == "vector2")
                     {
                         auto c = v->asA<mx::Vector2>();
-                        item["value"] = Json::arrayValue; item["value"].append(c[0]); item["value"].append(c[1]);
+                        out = Json::arrayValue; out.append(c[0]); out.append(c[1]);
                     }
                     else if (t == "vector3")
                     {
                         auto c = v->asA<mx::Vector3>();
-                        item["value"] = Json::arrayValue; item["value"].append(c[0]); item["value"].append(c[1]); item["value"].append(c[2]);
+                        out = Json::arrayValue; out.append(c[0]); out.append(c[1]); out.append(c[2]);
                     }
                     else if (t == "vector4")
                     {
                         auto c = v->asA<mx::Vector4>();
-                        item["value"] = Json::arrayValue; item["value"].append(c[0]); item["value"].append(c[1]); item["value"].append(c[2]); item["value"].append(c[3]);
+                        out = Json::arrayValue; out.append(c[0]); out.append(c[1]); out.append(c[2]); out.append(c[3]);
                     }
                     else
                     {
-                        item["value"] = v->getValueString();
+                        out = v->getValueString();
+                    }
+                    return out;
+                };
+
+                auto appendValue = [&](Json::Value& item, const mx::ValuePtr& v) {
+                    item["value"] = valueToJson(v);
+                };
+
+                auto appendUIProperties = [&](Json::Value& item, const mx::InputPtr& input) {
+                    if (!input)
+                    {
+                        return;
+                    }
+
+                    mx::UIProperties uiProps;
+                    if (mx::getUIProperties(input, mx::EMPTY_STRING, uiProps) == 0)
+                    {
+                        return;
+                    }
+
+                    Json::Value ui(Json::objectValue);
+                    if (!uiProps.uiName.empty()) ui["label"] = uiProps.uiName;
+                    if (!uiProps.uiFolder.empty()) ui["folder"] = uiProps.uiFolder;
+                    if (!uiProps.enumeration.empty())
+                    {
+                        Json::Value arr(Json::arrayValue);
+                        for (const auto& e : uiProps.enumeration) arr.append(e);
+                        ui["enum"] = arr;
+                    }
+                    if (!uiProps.enumerationValues.empty())
+                    {
+                        Json::Value arr(Json::arrayValue);
+                        for (const auto& ev : uiProps.enumerationValues) arr.append(valueToJson(ev));
+                        ui["enumValues"] = arr;
+                    }
+                    if (uiProps.uiMin) ui["min"] = valueToJson(uiProps.uiMin);
+                    if (uiProps.uiMax) ui["max"] = valueToJson(uiProps.uiMax);
+                    if (uiProps.uiSoftMin) ui["softMin"] = valueToJson(uiProps.uiSoftMin);
+                    if (uiProps.uiSoftMax) ui["softMax"] = valueToJson(uiProps.uiSoftMax);
+                    if (uiProps.uiStep) ui["step"] = valueToJson(uiProps.uiStep);
+                    if (uiProps.uiAdvanced) ui["advanced"] = uiProps.uiAdvanced;
+
+                    if (!ui.empty())
+                    {
+                        item["ui"] = ui;
                     }
                 };
+
+                mx::DocumentPtr doc = material->getDocument();
 
                 for (const auto& uniform : publicUniforms->getVariableOrder())
                 {
@@ -950,6 +998,29 @@ void RemoteServer::Impl::registerRoutes()
                     appendValue(item, uniform->getValue());
                     if (!uniform->getUnit().empty()) item["unit"] = uniform->getUnit();
                     if (!uniform->getColorSpace().empty()) item["colorspace"] = uniform->getColorSpace();
+
+                    mx::InputPtr input;
+                    if (doc)
+                    {
+                        mx::ElementPtr pathElement = doc->getDescendant(uniform->getPath());
+                        input = pathElement ? pathElement->asA<mx::Input>() : nullptr;
+                        if (input)
+                        {
+                            mx::InputPtr interfaceInput = input->getInterfaceInput();
+                            if (interfaceInput)
+                            {
+                                input = interfaceInput;
+                            }
+                        }
+                    }
+                    appendUIProperties(item, input);
+
+                    // Keep only controllable (UI-authored) uniforms; skip plumbing without UI hints.
+                    if (!item.isMember("ui"))
+                    {
+                        continue;
+                    }
+
                     list.append(item);
                 }
 
