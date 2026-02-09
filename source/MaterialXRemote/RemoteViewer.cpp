@@ -3,7 +3,18 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+//
+// Copyright Contributors to the MaterialX Project
+// SPDX-License-Identifier: Apache-2.0
+//
+
 #include <MaterialXRemote/RemoteViewer.h>
+
+#if defined(MATERIALX_REMOTE_EGL_ONLY)
+
+// EGL-only implementation lives in RemoteViewerEgl.{h,cpp}.
+
+#else
 
 #include <MaterialXFormat/Util.h>
 #include <MaterialXRenderGlsl/GlslMaterial.h>
@@ -21,6 +32,11 @@ const std::string DEFAULT_MATERIAL = "resources/Materials/Examples/StandardSurfa
 const std::string DEFAULT_MESH = "resources/Geometry/shaderball.glb";
 const std::string DEFAULT_ENV = "resources/Lights/san_giuseppe_bridge_split.hdr";
 const mx::FilePathVec DEFAULT_LIBRARY_FOLDERS = { mx::FilePath("libraries") };
+}
+
+bool RemoteViewer::isHeadless() const
+{
+    return _options.backend != Options::Backend::GLFWWindowed;
 }
 
 RemoteViewer::RemoteViewer(const Options& options) :
@@ -54,28 +70,23 @@ RemoteViewer::RemoteViewer(const Options& options) :
     {
         _options.libraryFolders = DEFAULT_LIBRARY_FOLDERS;
     }
-
-    if (_options.backend != Options::Backend::GLFWWindowed)
-    {
-        set_visible(false);
-    }
 }
 
 void RemoteViewer::initializeRemote()
 {
     initialize();
 
-    if (_options.backend == Options::Backend::GLFWWindowed)
-    {
-        set_visible(true);
-    }
-    else
+    if (isHeadless())
     {
         if (auto window = getWindow())
         {
             window->set_visible(false);
         }
         set_visible(false);
+    }
+    else
+    {
+        set_visible(true);
     }
 }
 
@@ -122,6 +133,8 @@ Json::Value RemoteViewer::applyShaderPackage(const ShaderPackage& pkg)
 
     return out;
 }
+
+#endif
 
 std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderAndCapture(const ShaderPackage& pkg,
                                                                                 unsigned int frames,

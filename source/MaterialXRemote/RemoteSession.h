@@ -9,7 +9,9 @@
 #include <MaterialXRemote/RemoteViewer.h>
 #include <MaterialXRemote/Types.h>
 
+#if !defined(MATERIALX_REMOTE_EGL_ONLY)
 #include <nanogui/common.h>
+#endif
 
 #include <condition_variable>
 #include <future>
@@ -17,6 +19,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <thread>
 #include <type_traits>
 #include <stdexcept>
@@ -84,6 +87,9 @@ class RemoteSession
     std::exception_ptr _renderThreadException;
     SessionMaterial _sessionMaterial;
     ShaderPackage _shaderOverride;
+
+    std::queue<std::function<void(RemoteViewer&)>> _workQueue;
+    std::condition_variable _workCv;
 };
 
 inline RemoteSession::RemoteSession() : RemoteSession(Config{})
@@ -141,24 +147,29 @@ inline auto RemoteSession::enqueue(Callable&& callable)
 
     auto work = std::forward<Callable>(callable);
 
-    nanogui::async([viewer = std::move(viewer), promise, work = std::move(work)]() mutable {
-        try
-        {
-            if constexpr (std::is_void_v<Result>)
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        _workQueue.push([viewer = std::move(viewer), promise, work = std::move(work)](RemoteViewer& v) mutable {
+            try
             {
-                std::invoke(std::move(work), std::ref(*viewer));
-                promise->set_value();
+                if constexpr (std::is_void_v<Result>)
+                {
+                    std::invoke(std::move(work), std::ref(v));
+                    promise->set_value();
+                }
+                else
+                {
+                    promise->set_value(std::invoke(std::move(work), std::ref(v)));
+                }
             }
-            else
+            catch (...)
             {
-                promise->set_value(std::invoke(std::move(work), std::ref(*viewer)));
+                promise->set_exception(std::current_exception());
             }
-        }
-        catch (...)
-        {
-            promise->set_exception(std::current_exception());
-        }
-    });
+        });
+    }
+
+    _workCv.notify_one();
 
     return future;
 }

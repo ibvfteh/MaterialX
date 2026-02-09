@@ -6,11 +6,16 @@
 #ifndef MATERIALXREMOTE_REMOTEVIEWER_H
 #define MATERIALXREMOTE_REMOTEVIEWER_H
 
+#if !defined(MATERIALX_REMOTE_EGL_ONLY)
 #include <MaterialXView/Viewer.h>
 #include <MaterialXRender/Util.h>
 #include <MaterialXFormat/File.h>
 #include <MaterialXCore/Library.h>
+#else
+#include <MaterialXRemote/RemoteViewerEgl.h>
 #include <MaterialXRemote/Types.h>
+#include <MaterialXRenderGlsl/GLUtil.h>
+#endif
 #include <json/json.h>
 
 #include <string>
@@ -21,17 +26,34 @@ namespace mx = MaterialX;
 
 MATERIALX_NAMESPACE_BEGIN
 
+#if defined(MATERIALX_REMOTE_EGL_ONLY)
+
+using RemoteViewer = RemoteViewerEgl;
+
+#else
+
 class RemoteViewer : public ::Viewer
 {
   public:
     struct Options
     {
-      enum class Backend
-      {
-        GLFWWindowed,
-        GLFWWindowless,
-        EGLHeadless
-      };
+#if defined(MATERIALX_REMOTE_EGL_ONLY)
+        std::string materialFilename;
+        std::string meshFilename;
+        std::string envRadianceFilename;
+        mx::FileSearchPath searchPath;
+        mx::FilePathVec libraryFolders;
+        int screenWidth = 1280;
+        int screenHeight = 960;
+        mx::Color3 screenColor = mx::DEFAULT_SCREEN_COLOR_SRGB;
+        // Backend is fixed to EGL headless in this build.
+    #else
+        enum class Backend
+        {
+            GLFWWindowed,
+            GLFWWindowless,
+            EGLHeadless
+        };
 
         std::string materialFilename;
         std::string meshFilename;
@@ -41,7 +63,8 @@ class RemoteViewer : public ::Viewer
         int screenWidth = 1280;
         int screenHeight = 960;
         mx::Color3 screenColor = mx::DEFAULT_SCREEN_COLOR_SRGB;
-      Backend backend = Backend::GLFWWindowless;
+        Backend backend = Backend::GLFWWindowless;
+    #endif
     };
 
     explicit RemoteViewer(const Options& options);
@@ -74,15 +97,16 @@ class RemoteViewer : public ::Viewer
                                     unsigned int height,
                                     unsigned int warmup);
 
-    Options::Backend getBackend() const { return _options.backend; }
-    bool isHeadless() const { return _options.backend != Options::Backend::GLFWWindowed; }
+    bool isHeadless() const;
 
   private:
     Options _options;
 };
 
-using RemoteViewerPtr = std::shared_ptr<RemoteViewer>;
-
-MATERIALX_NAMESPACE_END
-
 #endif
+
+  using RemoteViewerPtr = std::shared_ptr<RemoteViewer>;
+
+  MATERIALX_NAMESPACE_END
+
+  #endif

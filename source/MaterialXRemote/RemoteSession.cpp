@@ -5,7 +5,9 @@
 
 #include <MaterialXRemote/RemoteSession.h>
 
+#if !defined(MATERIALX_REMOTE_EGL_ONLY)
 #include <nanogui/common.h>
+#endif
 #include <MaterialXRenderGlsl/GLUtil.h>
 
 #include <filesystem>
@@ -100,17 +102,7 @@ void RemoteSession::stop()
         }
     }
 
-    if (viewer && nanogui::active())
-    {
-        nanogui::async([viewer = std::move(viewer)]() {
-            viewer->requestExit();
-            nanogui::leave();
-        });
-    }
-    else
-    {
-        nanogui::leave();
-    }
+    _workCv.notify_all();
 
     if (_renderThread.joinable())
     {
@@ -165,13 +157,19 @@ void RemoteSession::clearSessionMaterial()
 
 void RemoteSession::renderLoop(std::shared_ptr<std::promise<void>> startupPromise)
 {
-    bool nanoguiInitialized = false;
     bool startupDelivered = false;
+
+#if defined(MATERIALX_REMOTE_EGL_ONLY)
+    const bool useEgl = true;
+    (void) useEgl;
+#else
     EglHeadlessContext eglCtx;
     const bool useEgl = _config.viewerOptions.backend == RemoteViewer::Options::Backend::EGLHeadless;
+#endif
 
     try
     {
+#if !defined(MATERIALX_REMOTE_EGL_ONLY)
         if (useEgl)
         {
             if (!createEglHeadlessContext(eglCtx))
@@ -179,9 +177,7 @@ void RemoteSession::renderLoop(std::shared_ptr<std::promise<void>> startupPromis
                 throw std::runtime_error("Failed to initialize EGL headless context");
             }
         }
-
-        nanogui::init();
-        nanoguiInitialized = true;
+#endif
 
         auto viewer = std::make_shared<RemoteViewer>(_config.viewerOptions);
         viewer->initializeRemote();
@@ -196,17 +192,44 @@ void RemoteSession::renderLoop(std::shared_ptr<std::promise<void>> startupPromis
         startupDelivered = true;
 
         const float refresh = _config.refreshPeriodMs;
-        nanogui::mainloop(refresh);
+        auto processWork = [&]() {
+            std::queue<std::function<void(RemoteViewer&)>> local;
+            {
+                std::lock_guard<std::mutex> lock(_stateMutex);
+                std::swap(local, _workQueue);
+            }
+            while (!local.empty())
+            {
+                auto fn = std::move(local.front());
+                local.pop();
+                try { fn(*viewer); }
+                catch (...) {}
+            }
+        };
 
-        if (nanoguiInitialized)
+        while (true)
         {
-            nanogui::shutdown();
+            processWork();
+
+            {
+                std::unique_lock<std::mutex> lock(_stateMutex);
+                if (_state != State::Running)
+                {
+                    break;
+                }
+                if (_workQueue.empty())
+                {
+                    _workCv.wait_for(lock, std::chrono::milliseconds((int) refresh));
+                }
+            }
         }
 
+#if !defined(MATERIALX_REMOTE_EGL_ONLY)
         if (useEgl)
         {
             destroyEglHeadlessContext(eglCtx);
         }
+#endif
 
         {
             std::lock_guard<std::mutex> lock(_stateMutex);
@@ -229,19 +252,14 @@ void RemoteSession::renderLoop(std::shared_ptr<std::promise<void>> startupPromis
             _renderThreadException = eptr;
         }
 
-        if (nanoguiInitialized)
-        {
-            if (nanogui::active())
-            {
-                nanogui::leave();
-            }
-            nanogui::shutdown();
-        }
+        _workCv.notify_all();
 
+#if !defined(MATERIALX_REMOTE_EGL_ONLY)
         if (useEgl)
         {
             destroyEglHeadlessContext(eglCtx);
         }
+#endif
 
         {
             std::lock_guard<std::mutex> lock(_stateMutex);
