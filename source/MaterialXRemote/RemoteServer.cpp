@@ -610,99 +610,6 @@ void RemoteServer::Impl::registerRoutes()
 
     // (Deprecated) original POST /compile removed — use /shader/validate
 
-    // Render endpoint: compile current session shader package, render frames and return multipart/mixed
-    _server->Post("/render", [this](const httplib::Request& req, httplib::Response& res) {
-        try
-        {
-            // Parse optional parameters: frames, width, height, warmup
-            unsigned int frames = 1u;
-            unsigned int width = 128u;
-            unsigned int height = 128u;
-            unsigned int warmup = 0u;
-
-            if (!req.body.empty())
-            {
-                Json::CharReaderBuilder reader; Json::Value body; std::string errs; std::istringstream iss(req.body);
-                if (!Json::parseFromStream(reader, iss, &body, &errs)) { res.status = 400; res.set_content(errs, "text/plain"); return; }
-                if (body.isMember("frames")) frames = body["frames"].asUInt();
-                if (body.isMember("width")) width = body["width"].asUInt();
-                if (body.isMember("height")) height = body["height"].asUInt();
-                if (body.isMember("warmup")) warmup = body["warmup"].asUInt();
-            }
-
-            // Capture the current shader package (may be partial); we'll merge missing stages on the render thread.
-            ShaderPackage sessionPkg = _session->getShaderPackage();
-
-            using RenderResult = std::pair<Json::Value, std::vector<std::string>>;
-
-            auto future = _session->enqueue([sessionPkg, frames, width, height, warmup](RemoteViewer& viewer) -> RenderResult {
-                return viewer.renderAndCapture(sessionPkg, frames, width, height, warmup);
-            });
-
-            RenderResult result = future.get();
-
-            if (result.first.isMember("error"))
-            {
-                Json::StreamWriterBuilder jbuilder; jbuilder["indentation"] = "";
-                const std::string metadataStr = Json::writeString(jbuilder, result.first);
-                const std::string boundary = "MX_BOUNDARY_STATeless_" + std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count());
-                std::string outBody;
-                auto appendLine = [&outBody](const std::string& s) { outBody.append(s); outBody.append("\r\n"); };
-
-                appendLine("--" + boundary);
-                appendLine("Content-Type: application/json; charset=utf-8");
-                appendLine("");
-                outBody.append(metadataStr);
-                outBody.append("\r\n");
-                appendLine("--" + boundary + "--");
-                const std::string contentType = std::string("multipart/mixed; boundary=") + boundary;
-                res.status = 400;
-                res.set_content(outBody, contentType.c_str());
-                return;
-            }
-
-            // Build multipart/mixed response body
-            Json::StreamWriterBuilder jbuilder; jbuilder["indentation"] = "";
-            const std::string metadataStr = Json::writeString(jbuilder, result.first);
-
-            const std::string boundary = "MX_BOUNDARY_" + std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count());
-            std::string body;
-            auto appendLine = [&body](const std::string& s) { body.append(s); body.append("\r\n"); };
-
-            // JSON part
-            appendLine("--" + boundary);
-            appendLine("Content-Type: application/json; charset=utf-8");
-            appendLine("");
-            body.append(metadataStr);
-            body.append("\r\n");
-
-            // Image parts
-            for (size_t i = 0; i < result.second.size(); ++i)
-            {
-                const std::string& img = result.second[i];
-                appendLine("--" + boundary);
-                appendLine("Content-Type: application/octet-stream");
-                appendLine(std::string("Content-Disposition: attachment; filename=\"frame_") + std::to_string(i) + ".raw\"");
-                appendLine(std::string("Content-Length: ") + std::to_string(img.size()));
-                appendLine("");
-                // Binary raw RGB data
-                body.append(img.data(), img.size());
-                body.append("\r\n");
-            }
-
-            // Final boundary
-            appendLine("--" + boundary + "--");
-
-            const std::string contentType = std::string("multipart/mixed; boundary=") + boundary;
-            res.status = 200;
-            res.set_content(body, contentType.c_str());
-        }
-        catch (const std::exception& ex)
-        {
-            res.status = 500; res.set_content(ex.what(), "text/plain");
-        }
-    });
-
     // Stateless render endpoint: accept shader stages and uniform overrides inline
     // in the request and perform a render without mutating session-level state.
     // Body: { "stages": { "vertex": "...", "fragment": "..." },
@@ -1288,7 +1195,11 @@ void RemoteServer::Impl::registerRoutes()
         {
             auto future = _session->enqueue([](RemoteViewer& viewer) {
                 Json::Value out(Json::objectValue);
+            #if defined(MATERIALX_REMOTE_EGL_ONLY)
+                out["envRadianceFilename"] = viewer.getEnvRadianceFilename().asString();
+            #else
                 out["envRadianceFilename"] = viewer.getEnvRadianceFilename();
+            #endif
                 out["envLightIntensity"] = viewer.getEnvLightIntensity();
                 out["lightRotation"] = viewer.getLightRotation();
                 return out;
@@ -1399,9 +1310,9 @@ Json::Value RemoteServer::Impl::buildMaterialMetadataJson(const SessionMaterial&
     return root;
 }
 
-RemoteServer::RemoteServer(std::shared_ptr<RemoteSession> session, const Config& config) :
+RemoteServer::RemoteServer(std::shared_ptr<RemoteSession> session, Config config) :
     _session(std::move(session)),
-    _config(config),
+    _config(std::move(config)),
     _impl(std::make_unique<Impl>(_session, _config))
 {
 }

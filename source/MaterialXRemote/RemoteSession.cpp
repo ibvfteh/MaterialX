@@ -8,7 +8,6 @@
 #if !defined(MATERIALX_REMOTE_EGL_ONLY)
 #include <nanogui/common.h>
 #endif
-#include <MaterialXRenderGlsl/GLUtil.h>
 
 #include <filesystem>
 
@@ -159,26 +158,8 @@ void RemoteSession::renderLoop(std::shared_ptr<std::promise<void>> startupPromis
 {
     bool startupDelivered = false;
 
-#if defined(MATERIALX_REMOTE_EGL_ONLY)
-    const bool useEgl = true;
-    (void) useEgl;
-#else
-    EglHeadlessContext eglCtx;
-    const bool useEgl = _config.viewerOptions.backend == RemoteViewer::Options::Backend::EGLHeadless;
-#endif
-
     try
     {
-#if !defined(MATERIALX_REMOTE_EGL_ONLY)
-        if (useEgl)
-        {
-            if (!createEglHeadlessContext(eglCtx))
-            {
-                throw std::runtime_error("Failed to initialize EGL headless context");
-            }
-        }
-#endif
-
         auto viewer = std::make_shared<RemoteViewer>(_config.viewerOptions);
         viewer->initializeRemote();
 
@@ -224,13 +205,6 @@ void RemoteSession::renderLoop(std::shared_ptr<std::promise<void>> startupPromis
             }
         }
 
-#if !defined(MATERIALX_REMOTE_EGL_ONLY)
-        if (useEgl)
-        {
-            destroyEglHeadlessContext(eglCtx);
-        }
-#endif
-
         {
             std::lock_guard<std::mutex> lock(_stateMutex);
             _viewer.reset();
@@ -253,13 +227,6 @@ void RemoteSession::renderLoop(std::shared_ptr<std::promise<void>> startupPromis
         }
 
         _workCv.notify_all();
-
-#if !defined(MATERIALX_REMOTE_EGL_ONLY)
-        if (useEgl)
-        {
-            destroyEglHeadlessContext(eglCtx);
-        }
-#endif
 
         {
             std::lock_guard<std::mutex> lock(_stateMutex);

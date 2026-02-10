@@ -13,11 +13,14 @@
 #include <MaterialXRenderGlsl/GlslProgram.h>
 #include <MaterialXRenderGlsl/GLFramebuffer.h>
 #include <MaterialXRenderGlsl/GLTextureHandler.h>
+#include <MaterialXRender/ShaderMaterial.h>
 #include <MaterialXRender/Camera.h>
 #include <MaterialXRender/GeometryHandler.h>
 #include <MaterialXRender/LightHandler.h>
 #include <MaterialXRemote/Types.h>
 #include <MaterialXRenderGlsl/GLUtil.h>
+
+#include <json/json.h>
 
 #include <memory>
 #include <string>
@@ -50,11 +53,6 @@ class RemoteViewerEgl
     void loadDocumentFromFile(const mx::FilePath& filename);
 
     Json::Value applyShaderPackage(const ShaderPackage& pkg);
-    std::pair<Json::Value, std::vector<std::string>> renderAndCapture(const ShaderPackage& pkg,
-                                                                      unsigned int frames,
-                                                                      unsigned int width,
-                                                                      unsigned int height,
-                                                                      unsigned int warmup);
     std::pair<Json::Value, std::vector<std::string>> renderStateless(const ShaderPackage& candidatePkg,
                                                                      const Json::Value& uniformsPayload,
                                                                      unsigned int frames,
@@ -62,12 +60,38 @@ class RemoteViewerEgl
                                                                      unsigned int height,
                                                                      unsigned int warmup);
 
+    // Compatibility surface with the windowed viewer API used by RemoteServer routes.
+    void setCameraPosition(const mx::Vector3& pos);
+    void setCameraTarget(const mx::Vector3& tgt);
+    mx::Vector3 getCameraPosition() const { return _cameraPos; }
+    mx::Vector3 getCameraTarget() const { return _cameraTarget; }
+
+    void setCameraViewAngle(float degrees);
+    float getCameraViewAngle() const { return _cameraViewAngle; }
+
+    void setCameraZoom(float zoom);
+    float getCameraZoom() const { return _cameraZoom; }
+
+    void setEnvRadianceFilename(const mx::FilePath& path);
+    const mx::FilePath& getEnvRadianceFilename() const { return _envRadianceFilename; }
+
+    void setEnvLightIntensity(float intensity);
+    float getEnvLightIntensity() const { return _envLightIntensity; }
+
+    void setLightRotation(float yRotationDegrees);
+    float getLightRotation() const { return _lightRotation; }
+
+    std::vector<std::string> listGeometry() const;
+    std::string getActiveGeometryId() const { return _activeGeometryId; }
+    void setActiveGeometryById(const std::string& id);
+
     mx::MaterialPtr getSelectedMaterial();
     mx::ShaderPtr getShader() const { return _shader; }
 
     bool isHeadless() const { return true; }
 
   private:
+    void applyCameraState();
     bool ensureShader(const ShaderPackage& pkg);
     void resizeFramebuffer(unsigned int width, unsigned int height);
     void renderFrame();
@@ -87,10 +111,21 @@ class RemoteViewerEgl
 
     mx::GlslProgramPtr _program;
     mx::GLFramebufferPtr _framebuffer;
-    mx::GLTextureHandlerPtr _imageHandler;
+    mx::ImageHandlerPtr _imageHandler;
     mx::GeometryHandlerPtr _geometryHandler;
     mx::LightHandlerPtr _lightHandler;
     mx::CameraPtr _camera;
+
+    mx::Vector3 _cameraPos { 0.0f, 0.0f, 3.0f };
+    mx::Vector3 _cameraTarget { 0.0f, 0.0f, 0.0f };
+    float _cameraViewAngle { 45.0f };
+    float _cameraZoom { 1.0f };
+
+    mx::FilePath _envRadianceFilename;
+    float _envLightIntensity { 1.0f };
+    float _lightRotation { 0.0f };
+
+    std::string _activeGeometryId;
 
     unsigned int _width = 0;
     unsigned int _height = 0;

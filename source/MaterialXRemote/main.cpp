@@ -74,18 +74,13 @@ int main(int argc, char** argv)
 
         RemoteSession::Config sessionConfig;
         sessionConfig.refreshPeriodMs = refreshMs;
-    #if defined(MATERIALX_REMOTE_EGL_ONLY)
-        (void) headless;
-    #else
-        sessionConfig.viewerOptions.backend = headless ? RemoteViewer::Options::Backend::GLFWWindowless
-                                   : RemoteViewer::Options::Backend::GLFWWindowed;
-    #endif
+        sessionConfig.viewerOptions.headless = headless;
 
         std::cout << "Starting remote session ("
     #if defined(MATERIALX_REMOTE_EGL_ONLY)
               << "EGLHeadless"
     #else
-              << (headless ? "GLFWWindowless" : "GLFWWindowed")
+              << (headless ? "Headless" : "Windowed")
     #endif
               << ")..." << std::endl;
 
@@ -100,7 +95,7 @@ int main(int argc, char** argv)
 #if defined(MATERIALX_REMOTE_EGL_ONLY)
                       << "EGLHeadless"
 #else
-                      << (headless ? "GLFWWindowless" : "GLFWWindowed")
+                      << (headless ? "Headless" : "Windowed")
 #endif
                       << "): " << ex.what() << std::endl;
             return EXIT_FAILURE;

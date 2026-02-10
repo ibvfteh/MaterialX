@@ -31,7 +31,7 @@ class RemoteServer
     std::string materialCatalogPath; // optional path to server-side materials
     };
 
-    RemoteServer(std::shared_ptr<RemoteSession> session, const Config& config = {});
+    RemoteServer(std::shared_ptr<RemoteSession> session, Config config);
     ~RemoteServer();
 
     RemoteServer(const RemoteServer&) = delete;

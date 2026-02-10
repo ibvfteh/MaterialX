@@ -3,6 +3,10 @@ file(GLOB_RECURSE materialx_headers "${CMAKE_CURRENT_SOURCE_DIR}/*.h*")
 
 option(MATERIALX_EGL_ONLY "Build MaterialXRenderGlsl without X11 dependencies (EGL only)" OFF)
 
+if(MATERIALX_REMOTE_EGL_ONLY)
+    set(MATERIALX_EGL_ONLY ON)
+endif()
+
 if(POLICY CMP0072)
     cmake_policy(SET CMP0072 NEW)
 endif()
@@ -40,6 +44,10 @@ mx_add_library(MaterialXRenderGlsl
     EXPORT_DEFINE
         MATERIALX_RENDERGLSL_EXPORTS
     ADD_OBJECTIVE_C_CODE)
+
+if(MATERIALX_EGL_ONLY)
+    target_compile_definitions(${TARGET_NAME} PUBLIC MATERIALX_EGL_ONLY)
+endif()
 
 if(APPLE)
     target_compile_definitions(${TARGET_NAME} PRIVATE -DGL_SILENCE_DEPRECATION)

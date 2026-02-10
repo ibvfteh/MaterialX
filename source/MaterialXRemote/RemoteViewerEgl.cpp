@@ -12,8 +12,11 @@
 #include <MaterialXRender/Util.h>
 #include <MaterialXRenderGlsl/External/Glad/glad.h>
 #include <MaterialXRenderGlsl/GlslMaterial.h>
+#include <MaterialXRemote/RemoteViewerCommon.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <stdexcept>
 
 MATERIALX_NAMESPACE_BEGIN
@@ -26,13 +29,40 @@ const std::string DEFAULT_ENV = "resources/Lights/san_giuseppe_bridge_split.hdr"
 const mx::FilePathVec DEFAULT_LIBRARY_FOLDERS = { mx::FilePath("libraries") };
 }
 
-RemoteViewerEgl::RemoteViewerEgl(const Options& options) : _options(options)
+RemoteViewerEgl::RemoteViewerEgl(const Options& options) :
+    _options(options),
+    _genContext(mx::GlslShaderGenerator::create())
 {
     if (_options.materialFilename.empty()) _options.materialFilename = DEFAULT_MATERIAL;
     if (_options.meshFilename.empty()) _options.meshFilename = DEFAULT_MESH;
     if (_options.envRadianceFilename.empty()) _options.envRadianceFilename = DEFAULT_ENV;
     if (_options.searchPath.isEmpty()) _options.searchPath = mx::getDefaultDataSearchPath();
     if (_options.libraryFolders.empty()) _options.libraryFolders = DEFAULT_LIBRARY_FOLDERS;
+}
+
+void RemoteViewerEgl::applyCameraState()
+{
+    if (!_camera)
+    {
+        return;
+    }
+
+    const unsigned int safeWidth = std::max(1u, _width);
+    const unsigned int safeHeight = std::max(1u, _height);
+
+    _camera->setViewportSize(mx::Vector2((float) safeWidth, (float) safeHeight));
+    _camera->setViewMatrix(mx::Camera::createViewMatrix(_cameraPos, _cameraTarget, mx::Vector3(0, 1, 0)));
+
+    const float fovY = std::max(1.0f, _cameraViewAngle / std::max(0.001f, _cameraZoom));
+    const float aspect = (float) safeWidth / (float) safeHeight;
+    const float n = 0.05f;
+    const float f = 100.0f;
+    const float fovRad = fovY * 3.14159265358979323846f / 180.0f;
+    const float t = std::tan(0.5f * fovRad) * n;
+    const float b = -t;
+    const float r = t * aspect;
+    const float l = -r;
+    _camera->setProjectionMatrix(mx::Camera::createPerspectiveMatrix(l, r, b, t, n, f));
 }
 
 RemoteViewerEgl::~RemoteViewerEgl()
@@ -65,12 +95,7 @@ void RemoteViewerEgl::initializeRemote()
     }
     _options.searchPath = search;
     _stdlib = mx::createDocument();
-    mx::StringVec libraries;
-    for (const mx::FilePath& p : _options.libraryFolders)
-    {
-        libraries.push_back(p.asString());
-    }
-    mx::loadLibraries(libraries, search, _stdlib);
+    mx::loadLibraries(_options.libraryFolders, search, _stdlib);
 
     // Generator context
     mx::ShaderGeneratorPtr gen = mx::GlslShaderGenerator::create();
@@ -78,7 +103,7 @@ void RemoteViewerEgl::initializeRemote()
     _genContext.registerSourceCodeSearchPath(search);
     _genContext.getOptions().hwMaxActiveLightSources = 3;
     _genContext.getOptions().hwSpecularEnvironmentMethod = mx::SPECULAR_ENVIRONMENT_FIS;
-    _genContext.getOptions().hwLightShaderName = "shadow_lighting";
+    // hwLightShaderName removed in current GenOptions
 
     // Handlers
     _imageHandler = mx::GLTextureHandler::create(mx::StbImageLoader::create());
@@ -91,6 +116,11 @@ void RemoteViewerEgl::initializeRemote()
     // Set defaults
     _width = static_cast<unsigned int>(_options.screenWidth);
     _height = static_cast<unsigned int>(_options.screenHeight);
+    _envRadianceFilename = _options.envRadianceFilename;
+    _cameraPos = mx::Vector3(0.0f, 0.0f, 3.0f);
+    _cameraTarget = mx::Vector3(0.0f, 0.0f, 0.0f);
+    _cameraViewAngle = 45.0f;
+    _cameraZoom = 1.0f;
 
     // Load initial document
     loadDocumentFromFile(mx::FilePath(_options.materialFilename));
@@ -131,9 +161,31 @@ void RemoteViewerEgl::loadDocumentFromFile(const mx::FilePath& filename)
 
     // Load geometry
     _geometryHandler->clearGeometry();
-    if (!_geometryHandler->loadGeometry(_options.meshFilename, _options.searchPath))
+    if (!_geometryHandler->loadGeometry(_options.meshFilename))
     {
         throw std::runtime_error("Failed to load geometry: " + _options.meshFilename);
+    }
+
+    const auto& meshes = _geometryHandler->getMeshes();
+    if (!_activeGeometryId.empty())
+    {
+        bool found = false;
+        for (const auto& mesh : meshes)
+        {
+            if (mesh && mesh->getName() == _activeGeometryId)
+            {
+                found = true;
+                break;
+            }
+        }
+        if (!found && !meshes.empty() && meshes[0])
+        {
+            _activeGeometryId = meshes[0]->getName();
+        }
+    }
+    else if (!meshes.empty() && meshes[0])
+    {
+        _activeGeometryId = meshes[0]->getName();
     }
 
     // Lights
@@ -142,16 +194,16 @@ void RemoteViewerEgl::loadDocumentFromFile(const mx::FilePath& filename)
     _lightHandler->setLightSources(lights);
     _lightHandler->registerLights(_doc, lights, _genContext);
 
-    mx::ImagePtr envMap = _imageHandler->acquireImage(_options.envRadianceFilename);
+    mx::ImagePtr envMap = _imageHandler->acquireImage(_envRadianceFilename);
     if (envMap)
     {
         _lightHandler->setEnvRadianceMap(envMap);
     }
+    _lightHandler->setEnvLightIntensity(_envLightIntensity);
+    _lightHandler->setLightTransform(mx::Matrix44::createRotationY(_lightRotation / 180.0f * 3.14159265358979323846f));
 
     // Camera defaults
-    _camera->setViewport(static_cast<float>(_width), static_cast<float>(_height));
-    _camera->setViewMatrix(mx::Matrix44::createLookAt(mx::Vector3(0.0f, 0.0f, 3.0f), mx::Vector3(0.0f), mx::Vector3(0, 1, 0)));
-    _camera->setPerspective(45.0f, (float) _width / (float) _height, 0.05f, 100.0f);
+    applyCameraState();
 }
 
 bool RemoteViewerEgl::ensureShader(const ShaderPackage& pkg)
@@ -193,9 +245,7 @@ void RemoteViewerEgl::resizeFramebuffer(unsigned int width, unsigned int height)
         _framebuffer = mx::GLFramebuffer::create(width, height, 4, mx::Image::BaseType::FLOAT);
         _width = width;
         _height = height;
-
-        _camera->setViewport(static_cast<float>(_width), static_cast<float>(_height));
-        _camera->setPerspective(45.0f, (float) _width / (float) _height, 0.05f, 100.0f);
+        applyCameraState();
     }
 }
 
@@ -228,17 +278,28 @@ void RemoteViewerEgl::renderFrame()
     glslMaterial->bindLighting(_lightHandler, _imageHandler, shadowState);
     glslMaterial->bindImages(_imageHandler, _options.searchPath);
 
-    const auto& partList = _geometryHandler->getGeometryPartitions();
-    for (const auto& part : partList)
+    for (const auto& mesh : _geometryHandler->getMeshes())
     {
-        mx::MeshPtr mesh = _geometryHandler->findParentMesh(part);
         if (!mesh)
         {
             continue;
         }
+        if (!_activeGeometryId.empty() && mesh->getName() != _activeGeometryId)
+        {
+            continue;
+        }
         glslMaterial->bindMesh(mesh);
-        glslMaterial->bindPartition(part);
-        glslMaterial->drawPartition(part);
+        const size_t partCount = mesh->getPartitionCount();
+        for (size_t i = 0; i < partCount; ++i)
+        {
+            mx::MeshPartitionPtr part = mesh->getPartition(i);
+            if (!part)
+            {
+                continue;
+            }
+            glslMaterial->bindPartition(part);
+            glslMaterial->drawPartition(part);
+        }
     }
 
     glslMaterial->unbindImages(_imageHandler);
@@ -259,77 +320,31 @@ bool RemoteViewerEgl::captureFrame(std::string& outBytes, Json::Value& frameDesc
         return false;
     }
 
-    const unsigned int iw = img->getWidth();
-    const unsigned int ih = img->getHeight();
-    const unsigned int ich = img->getChannelCount();
-    const auto baseType = img->getBaseType();
-
-    std::vector<float> packed;
-    packed.resize(static_cast<size_t>(iw) * ih * 3);
-    const unsigned int rowStride = img->getRowStride();
-    void* resBuf = img->getResourceBuffer();
-    auto writePixel = [&](unsigned int x, unsigned int y, float r, float g, float b) {
-        size_t idx = (size_t)(y * iw + x) * 3;
-        packed[idx + 0] = r;
-        packed[idx + 1] = g;
-        packed[idx + 2] = b;
-    };
-
-    if (baseType == mx::Image::BaseType::FLOAT)
-    {
-        for (unsigned int y = 0; y < ih; ++y)
-        {
-            float* row = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(resBuf) + (size_t)y * rowStride);
-            for (unsigned int x = 0; x < iw; ++x)
-            {
-                float c0 = ich > 0 ? row[x * ich + 0] : 0.0f;
-                float c1 = ich > 1 ? row[x * ich + 1] : c0;
-                float c2 = ich > 2 ? row[x * ich + 2] : c0;
-                writePixel(x, y, c0, c1, c2);
-            }
-        }
-    }
-    else if (baseType == mx::Image::BaseType::UINT8)
-    {
-        for (unsigned int y = 0; y < ih; ++y)
-        {
-            uint8_t* row = reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(resBuf) + (size_t)y * rowStride);
-            for (unsigned int x = 0; x < iw; ++x)
-            {
-                uint8_t c0 = ich > 0 ? row[x * ich + 0] : 0;
-                uint8_t c1 = ich > 1 ? row[x * ich + 1] : c0;
-                uint8_t c2 = ich > 2 ? row[x * ich + 2] : c0;
-                writePixel(x, y, c0 / 255.0f, c1 / 255.0f, c2 / 255.0f);
-            }
-        }
-    }
-    else
-    {
-        return false;
-    }
-
-    const char* p = reinterpret_cast<const char*>(packed.data());
-    outBytes.assign(p, packed.size() * sizeof(float));
-
-    frameDesc["width"] = iw;
-    frameDesc["height"] = ih;
-    frameDesc["channels"] = 3u;
-    frameDesc["dtype"] = "float32";
-    frameDesc["byteLength"] = (Json::UInt64)(packed.size() * sizeof(float));
-    frameDesc["origin"] = "bottom-left";
-    return true;
+    RemoteViewerCommon::PackResult packResult = RemoteViewerCommon::packImageToFloatRgb(img, outBytes, frameDesc);
+    return packResult.success;
 }
 
 Json::Value RemoteViewerEgl::applyShaderPackage(const ShaderPackage& pkg)
 {
     Json::Value out(Json::objectValue);
+    mx::MaterialPtr material = _material;
+    if (!material)
+    {
+        out["error"] = "No material or shader available";
+        return out;
+    }
+
+    auto glslMaterial = std::dynamic_pointer_cast<mx::GlslMaterial>(material);
+    if (!glslMaterial)
+    {
+        out["error"] = "Selected material is not a GLSL material";
+        return out;
+    }
+
     try
     {
-        if (!ensureShader(pkg))
-        {
-            out["error"] = "No material or shader available";
-            return out;
-        }
+        glslMaterial->setProgramStages(pkg.vertex, pkg.fragment);
+        _program = glslMaterial->getProgram();
         out["status"] = "ok";
     }
     catch (const std::exception& e)
@@ -339,26 +354,103 @@ Json::Value RemoteViewerEgl::applyShaderPackage(const ShaderPackage& pkg)
     return out;
 }
 
-std::pair<Json::Value, std::vector<std::string>> RemoteViewerEgl::renderAndCapture(const ShaderPackage& pkg,
-                                                                                unsigned int frames,
-                                                                                unsigned int width,
-                                                                                unsigned int height,
-                                                                                unsigned int warmup)
+std::pair<Json::Value, std::vector<std::string>> RemoteViewerEgl::renderStateless(const ShaderPackage& candidatePkg,
+                                                                               const Json::Value& uniformsPayload,
+                                                                               unsigned int frames,
+                                                                               unsigned int width,
+                                                                               unsigned int height,
+                                                                               unsigned int warmup)
 {
     Json::Value meta(Json::objectValue);
     std::vector<std::string> images;
 
+    const auto callStart = std::chrono::high_resolution_clock::now();
+    double renderMsTotal = 0.0;
+
     try
     {
-        if (!ensureShader(pkg))
+        mx::MaterialPtr material = _material;
+        if (!material)
         {
-            meta["error"] = "No material or shader available";
+            meta["error"] = "No selected material available";
+            return { meta, images };
+        }
+
+        auto glslMaterial = std::dynamic_pointer_cast<mx::GlslMaterial>(material);
+        if (!glslMaterial)
+        {
+            meta["error"] = "Selected material is not a GLSL material";
+            return { meta, images };
+        }
+
+        mx::ShaderPtr shader = material->getShader();
+        if (!shader)
+        {
+            meta["error"] = "Shader not generated for selected material";
+            return { meta, images };
+        }
+
+        std::string origVertex;
+        std::string origFragment;
+        mx::ShaderPtr origShader = material->getShader();
+        if (origShader)
+        {
+            origVertex = origShader->getSourceCode(mx::Stage::VERTEX);
+            origFragment = origShader->getSourceCode(mx::Stage::PIXEL);
+        }
+
+        const std::string genVertex = shader->getSourceCode(mx::Stage::VERTEX);
+        const std::string genFragment = shader->getSourceCode(mx::Stage::PIXEL);
+
+        auto restoreState = [&]() {
+            try
+            {
+                if (!origVertex.empty() || !origFragment.empty())
+                {
+                    glslMaterial->setProgramStages(origVertex, origFragment);
+                }
+                else
+                {
+                    glslMaterial->setProgramStages(genVertex, genFragment);
+                }
+                _program = glslMaterial->getProgram();
+            }
+            catch (...) {}
+        };
+
+        ShaderPackage finalPkg = candidatePkg;
+        if (finalPkg.vertex.empty()) finalPkg.vertex = genVertex;
+        if (finalPkg.fragment.empty()) finalPkg.fragment = genFragment;
+
+        ShaderPackage finalPkg;
+        auto compileStart = std::chrono::high_resolution_clock::now();
+        RemoteViewerCommon::CompileResult cresult = RemoteViewerCommon::compileAndApplyShader(material, candidatePkg, finalPkg);
+        auto compileEnd = std::chrono::high_resolution_clock::now();
+        if (!cresult.success)
+        {
+            if (!cresult.error.empty())
+            {
+                meta["error"] = cresult.error;
+            }
+            else
+            {
+                meta["status"] = "compile_error";
+                meta["errors"] = cresult.compileErrors;
+            }
+            return { meta, images };
+        }
+        _program = glslMaterial->getProgram();
+
+        RemoteViewerCommon::UniformApplyResult uniformResult = RemoteViewerCommon::applyUniformPayload(material, uniformsPayload);
+        if (!uniformResult.success)
+        {
+            restoreState();
+            meta["error"] = uniformResult.error;
             return { meta, images };
         }
 
         resizeFramebuffer(width, height);
 
-        // Warmup frames
         for (unsigned int i = 0; i < warmup; ++i)
         {
             renderFrame();
@@ -369,13 +461,16 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewerEgl::renderAndCaptu
         {
             auto start = std::chrono::high_resolution_clock::now();
             renderFrame();
+
             Json::Value desc;
             std::string bytes;
             if (!captureFrame(bytes, desc))
             {
                 meta["error"] = "Failed to capture frame";
+                restoreState();
                 return { meta, images };
             }
+
             images.emplace_back(std::move(bytes));
             desc["index"] = (unsigned int) f;
             if (!meta.isMember("frames_info"))
@@ -383,9 +478,11 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewerEgl::renderAndCaptu
                 meta["frames_info"] = Json::Value(Json::arrayValue);
             }
             meta["frames_info"].append(desc);
+
             auto end = std::chrono::high_resolution_clock::now();
             std::chrono::duration<double, std::milli> elapsed = end - start;
             timings.push_back(elapsed.count());
+            renderMsTotal += elapsed.count();
         }
 
         meta["status"] = "ok";
@@ -398,10 +495,32 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewerEgl::renderAndCaptu
                 meta["width"] = first["width"].asUInt();
                 meta["height"] = first["height"].asUInt();
             }
+            else
+            {
+                meta["width"] = (unsigned int) width;
+                meta["height"] = (unsigned int) height;
+            }
+        }
+        else
+        {
+            meta["width"] = (unsigned int) width;
+            meta["height"] = (unsigned int) height;
         }
         Json::Value tarr(Json::arrayValue);
         for (double d : timings) tarr.append(d);
         meta["timings_ms"] = tarr;
+
+        auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
+        const double compileMs = ms(compileEnd - compileStart);
+        const double totalMs = ms(std::chrono::high_resolution_clock::now() - callStart);
+        std::cout << "[RemoteViewerEgl] renderStateless timings compile_ms=" << compileMs
+                  << " render_ms=" << renderMsTotal
+                  << " total_ms=" << totalMs
+                  << " frames=" << frames
+                  << " size=" << width << "x" << height
+                  << std::endl;
+
+        restoreState();
     }
     catch (const std::exception& e)
     {
@@ -411,20 +530,97 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewerEgl::renderAndCaptu
     return { meta, images };
 }
 
-std::pair<Json::Value, std::vector<std::string>> RemoteViewerEgl::renderStateless(const ShaderPackage& candidatePkg,
-                                                                               const Json::Value& uniformsPayload,
-                                                                               unsigned int frames,
-                                                                               unsigned int width,
-                                                                               unsigned int height,
-                                                                               unsigned int warmup)
-{
-    (void) uniformsPayload;
-    return renderAndCapture(candidatePkg, frames, width, height, warmup);
-}
-
 mx::MaterialPtr RemoteViewerEgl::getSelectedMaterial()
 {
     return _material;
+}
+
+void RemoteViewerEgl::setCameraPosition(const mx::Vector3& pos)
+{
+    _cameraPos = pos;
+    applyCameraState();
+}
+
+void RemoteViewerEgl::setCameraTarget(const mx::Vector3& tgt)
+{
+    _cameraTarget = tgt;
+    applyCameraState();
+}
+
+void RemoteViewerEgl::setCameraViewAngle(float degrees)
+{
+    _cameraViewAngle = std::max(1.0f, degrees);
+    applyCameraState();
+}
+
+void RemoteViewerEgl::setCameraZoom(float zoom)
+{
+    _cameraZoom = std::max(0.001f, zoom);
+    applyCameraState();
+}
+
+void RemoteViewerEgl::setEnvRadianceFilename(const mx::FilePath& path)
+{
+    _envRadianceFilename = path;
+    if (_imageHandler && _lightHandler)
+    {
+        mx::ImagePtr envMap = _imageHandler->acquireImage(_envRadianceFilename);
+        if (envMap)
+        {
+            _lightHandler->setEnvRadianceMap(envMap);
+        }
+    }
+}
+
+void RemoteViewerEgl::setEnvLightIntensity(float intensity)
+{
+    _envLightIntensity = intensity;
+    if (_lightHandler)
+    {
+        _lightHandler->setEnvLightIntensity(intensity);
+    }
+}
+
+void RemoteViewerEgl::setLightRotation(float yRotationDegrees)
+{
+    _lightRotation = yRotationDegrees;
+    if (_lightHandler)
+    {
+        _lightHandler->setLightTransform(mx::Matrix44::createRotationY(_lightRotation / 180.0f * 3.14159265358979323846f));
+    }
+}
+
+std::vector<std::string> RemoteViewerEgl::listGeometry() const
+{
+    std::vector<std::string> out;
+    if (!_geometryHandler)
+    {
+        return out;
+    }
+    for (const auto& mesh : _geometryHandler->getMeshes())
+    {
+        if (mesh)
+        {
+            out.push_back(mesh->getName());
+        }
+    }
+    return out;
+}
+
+void RemoteViewerEgl::setActiveGeometryById(const std::string& id)
+{
+    if (id.empty() || !_geometryHandler)
+    {
+        return;
+    }
+    for (const auto& mesh : _geometryHandler->getMeshes())
+    {
+        if (mesh && mesh->getName() == id)
+        {
+            _activeGeometryId = id;
+            break;
+        }
+    }
 }
 
 MATERIALX_NAMESPACE_END
