@@ -421,20 +421,6 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
         const std::string genVertex = shader->getSourceCode(mx::Stage::VERTEX);
         const std::string genFragment = shader->getSourceCode(mx::Stage::PIXEL);
 
-        // Save original uniform valueStrings for public uniforms
-        std::vector<std::pair<std::string, std::string>> savedUniforms;
-        const mx::VariableBlock* publicUniforms = material->getPublicUniforms();
-        if (publicUniforms)
-        {
-            for (const auto& u : publicUniforms->getVariableOrder())
-            {
-                if (!material->findUniform(u->getPath())) continue;
-                std::string val;
-                if (u->getValue()) val = u->getValue()->getValueString();
-                savedUniforms.emplace_back(u->getPath(), val);
-            }
-        }
-
         auto restoreState = [&]() {
             try
             {
@@ -448,20 +434,6 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
                 }
             }
             catch (...) {}
-
-            for (const auto& p : savedUniforms)
-            {
-                const std::string& path = p.first; const std::string& val = p.second;
-                try
-                {
-                    mx::ShaderPort* uniform = material->findUniform(path);
-                    if (!uniform) continue;
-                    if (val.empty()) continue;
-                    mx::ValuePtr v = mx::Value::createValueFromStrings(val, uniform->getType().getName());
-                    material->modifyUniform(path, v, val);
-                }
-                catch (...) {}
-            }
         };
 
         ShaderPackage finalPkg = candidatePkg;
@@ -512,6 +484,11 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
             return false;
         };
 
+        auto jsonToString = [](const Json::Value& v) {
+            Json::StreamWriterBuilder b; b["indentation"] = "";
+            return Json::writeString(b, v);
+        };
+
         // Apply inline uniforms (if any)
         if (uniformsPayload.isArray() && uniformsPayload.size() > 0)
         {
@@ -539,6 +516,7 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
                             throw std::runtime_error("expected float");
                         mx::ValuePtr v = mx::Value::createValue(floats[0]);
                         material->modifyUniform(path, v);
+                        std::cout << "[RemoteViewer] uniform set float " << path << " = " << floats[0] << std::endl;
                     }
                     else if (typeName == "color3" || typeName == "vector3")
                     {
@@ -548,6 +526,8 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
                             mx::Value::createValue(mx::Color3(floats[0], floats[1], floats[2])) :
                             mx::Value::createValue(mx::Vector3(floats[0], floats[1], floats[2]));
                         material->modifyUniform(path, v);
+                        std::cout << "[RemoteViewer] uniform set " << typeName << " " << path
+                                  << " = [" << floats[0] << "," << floats[1] << "," << floats[2] << "]" << std::endl;
                     }
                     else if (typeName == "vector2")
                     {
@@ -555,6 +535,8 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
                             throw std::runtime_error("expected float[2]");
                         mx::ValuePtr v = mx::Value::createValue(mx::Vector2(floats[0], floats[1]));
                         material->modifyUniform(path, v);
+                        std::cout << "[RemoteViewer] uniform set vector2 " << path
+                                  << " = [" << floats[0] << "," << floats[1] << "]" << std::endl;
                     }
                     else if (typeName == "vector4")
                     {
@@ -562,6 +544,8 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
                             throw std::runtime_error("expected float[4]");
                         mx::ValuePtr v = mx::Value::createValue(mx::Vector4(floats[0], floats[1], floats[2], floats[3]));
                         material->modifyUniform(path, v);
+                        std::cout << "[RemoteViewer] uniform set vector4 " << path
+                                  << " = [" << floats[0] << "," << floats[1] << "," << floats[2] << "," << floats[3] << "]" << std::endl;
                     }
                     else if (typeName == "integer")
                     {
@@ -569,6 +553,7 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
                         {
                             mx::ValuePtr v = mx::Value::createValue(val.asInt());
                             material->modifyUniform(path, v);
+                            std::cout << "[RemoteViewer] uniform set int " << path << " = " << val.asInt() << std::endl;
                         }
                         else if (val.isString())
                         {
@@ -577,6 +562,7 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
                                 throw std::runtime_error("expected integer");
                             mx::ValuePtr v = mx::Value::createValue((int)floats[0]);
                             material->modifyUniform(path, v);
+                            std::cout << "[RemoteViewer] uniform set int " << path << " = " << (int)floats[0] << std::endl;
                         }
                         else
                         {
@@ -588,6 +574,7 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
                         if (!val.isBool()) throw std::runtime_error("expected boolean");
                         mx::ValuePtr v = mx::Value::createValue(val.asBool());
                         material->modifyUniform(path, v);
+                        std::cout << "[RemoteViewer] uniform set bool " << path << " = " << std::boolalpha << val.asBool() << std::endl;
                     }
                     else
                     {
@@ -595,6 +582,8 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
                         std::string valueStr = val.isString() ? val.asString() : val.toStyledString();
                         mx::ValuePtr v = mx::Value::createValueFromStrings(valueStr, typeName);
                         material->modifyUniform(path, v, valueStr);
+                        std::cout << "[RemoteViewer] uniform set " << typeName << " " << path
+                                  << " = " << jsonToString(val) << std::endl;
                     }
                 }
                 catch (const std::exception& e)

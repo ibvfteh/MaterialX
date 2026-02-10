@@ -142,6 +142,8 @@ int main(int argc, char** argv)
         {
             try
             {
+                std::cout << "Material path requested: " << materialPath << std::endl;
+
                 // Select material path in-session (stores path/name)
                 SessionMaterial stored = session->selectMaterialFromPath(materialPath);
 

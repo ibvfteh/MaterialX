@@ -58,8 +58,8 @@ class RemoteViewer : public ::Viewer
 
   /// Perform a stateless render: compile/apply the provided shader package,
   /// apply the provided uniform overrides (JSON array of {path,value}), render
-  /// frames and restore prior shader/uniform state. This is intended for
-  /// single-call renders that must not mutate session state.
+  /// frames. This is intended for single-call renders; uniforms now persist
+  /// after the call.
   std::pair<Json::Value, std::vector<std::string>> renderStateless(const ShaderPackage& candidatePkg,
                                     const Json::Value& uniformsPayload,
                                     unsigned int frames,

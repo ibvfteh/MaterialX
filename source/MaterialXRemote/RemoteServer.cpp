@@ -116,6 +116,18 @@ RemoteServer::Impl::Impl(std::shared_ptr<RemoteSession> session, const Config& c
     {
         _catalog = std::make_unique<MaterialCatalog>(_config.materialCatalogPath);
         _catalog->scan();
+
+        try
+        {
+            std::cout << "[RemoteServer] Catalog path: "
+                      << std::filesystem::absolute(_config.materialCatalogPath).string()
+                      << std::endl;
+        }
+        catch (...)
+        {
+            std::cout << "[RemoteServer] Catalog path (as provided): "
+                      << _config.materialCatalogPath << std::endl;
+        }
     }
 }
 
