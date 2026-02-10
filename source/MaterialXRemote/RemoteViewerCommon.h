@@ -46,6 +46,11 @@ UniformApplyResult applyUniformPayload(mx::MaterialPtr material,
                                        const Json::Value& uniformsPayload,
                                        const std::function<void(const std::string&)>& logFn = {});
 
+// Reapply the current material uniform values to the active GL program. Useful after recompiling
+// or swapping programs so previously-set values are bound again without an explicit payload.
+UniformApplyResult reapplyStoredUniformValues(mx::MaterialPtr material,
+                                              const std::function<void(const std::string&)>& logFn = {});
+
 // Merge candidate shader stages with generated stages and compile/apply to the given material.
 // Returns mergedPkg containing the actual stages used. On compile failures, success=false and
 // compileErrors is populated. On other failures, error contains a message.

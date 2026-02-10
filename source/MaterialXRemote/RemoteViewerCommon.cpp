@@ -239,6 +239,76 @@ UniformApplyResult applyUniformPayload(mx::MaterialPtr material,
     return result;
 }
 
+UniformApplyResult reapplyStoredUniformValues(mx::MaterialPtr material,
+                                              const std::function<void(const std::string&)>& logFn)
+{
+    UniformApplyResult result;
+
+    auto glslMaterial = std::dynamic_pointer_cast<mx::GlslMaterial>(material);
+    if (!glslMaterial)
+    {
+        result.success = false;
+        result.error = "Selected material is not a GLSL material";
+        return result;
+    }
+
+    mx::VariableBlock* uniforms = glslMaterial->getPublicUniforms();
+    if (!uniforms)
+    {
+        return result;
+    }
+
+    for (const auto& port : uniforms->getVariableOrder())
+    {
+        if (!port)
+        {
+            continue;
+        }
+        mx::ConstValuePtr val = port->getValue();
+        if (!val)
+        {
+            continue;
+        }
+
+        const std::string typeName = port->getType().getName();
+        if (typeName == "filename")
+        {
+            if (logFn)
+            {
+                logFn("uniform reapply skip filename " + port->getPath());
+            }
+            continue;
+        }
+
+        try
+        {
+            glslMaterial->modifyUniform(port->getPath(), val);
+            if (logFn)
+            {
+                logFn("uniform reapply " + port->getPath());
+            }
+        }
+        catch (const std::exception& e)
+        {
+            if (logFn)
+            {
+                logFn("uniform reapply skip " + port->getPath() + " reason=" + e.what());
+            }
+            continue;
+        }
+        catch (...)
+        {
+            if (logFn)
+            {
+                logFn("uniform reapply skip " + port->getPath());
+            }
+            continue;
+        }
+    }
+
+    return result;
+}
+
 CompileResult compileAndApplyShader(mx::MaterialPtr material,
                                     const ShaderPackage& candidatePkg,
                                     ShaderPackage& mergedPkg)
@@ -290,7 +360,6 @@ CompileResult compileAndApplyShader(mx::MaterialPtr material,
     result.compileMs = std::chrono::duration<double, std::milli>(compileEnd - compileStart).count();
     return result;
 }
-
 PackResult packImageToFloatRgb(mx::ImagePtr img, std::string& outBytes, Json::Value& frameDesc)
 {
     PackResult result;

@@ -13,6 +13,7 @@
 #include <MaterialXRenderGlsl/GlslProgram.h>
 #include <MaterialXRenderGlsl/GLFramebuffer.h>
 #include <MaterialXRenderGlsl/GLTextureHandler.h>
+#include <MaterialXRenderGlsl/GlslMaterial.h>
 #include <MaterialXRender/ShaderMaterial.h>
 #include <MaterialXRender/Camera.h>
 #include <MaterialXRender/GeometryHandler.h>
@@ -44,6 +45,8 @@ class RemoteViewerEgl
         int screenWidth = 1280;
         int screenHeight = 960;
         mx::Color3 screenColor = mx::DEFAULT_SCREEN_COLOR_SRGB;
+        // Headless flag: false -> windowed, true -> windowless. EGL builds ignore and run headless.
+        bool headless = true;
     };
 
     explicit RemoteViewerEgl(const Options& options);
@@ -92,8 +95,10 @@ class RemoteViewerEgl
 
   private:
     void applyCameraState();
+    void centerCameraToGeometry();
     bool ensureShader(const ShaderPackage& pkg);
     void resizeFramebuffer(unsigned int width, unsigned int height);
+    mx::ImagePtr renderShadowMap(mx::NodePtr dirLight, int shadowMapSize);
     void renderFrame();
     bool captureFrame(std::string& outBytes, Json::Value& frameDesc);
 
@@ -108,6 +113,7 @@ class RemoteViewerEgl
     mx::DocumentPtr _doc;
     mx::MaterialPtr _material;
     mx::ShaderPtr _shader;
+    mx::UnitConverterRegistryPtr _unitRegistry;
 
     mx::GlslProgramPtr _program;
     mx::GLFramebufferPtr _framebuffer;
@@ -115,15 +121,29 @@ class RemoteViewerEgl
     mx::GeometryHandlerPtr _geometryHandler;
     mx::LightHandlerPtr _lightHandler;
     mx::CameraPtr _camera;
+    mx::CameraPtr _shadowCamera;
+    mx::ImagePtr _shadowMap;
+    mx::GlslMaterialPtr _shadowMaterial;
+    mx::GlslMaterialPtr _shadowBlurMaterial;
+    unsigned int _shadowSoftness { 1 };
+    mx::MeshPtr _quadMesh;
+    mx::DocumentPtr _lightRigDoc;
+    mx::FilePath _lightRigFilename;
 
-    mx::Vector3 _cameraPos { 0.0f, 0.0f, 3.0f };
+    mx::Vector3 _cameraPos { 0.0f, 0.0f, 5.0f };
     mx::Vector3 _cameraTarget { 0.0f, 0.0f, 0.0f };
     float _cameraViewAngle { 45.0f };
     float _cameraZoom { 1.0f };
+    mx::Vector3 _centeringOffset { 0.0f, 0.0f, 0.0f };
 
     mx::FilePath _envRadianceFilename;
     float _envLightIntensity { 1.0f };
     float _lightRotation { 0.0f };
+    float _ambientOcclusionGain { 0.6f };
+    bool _normalizeEnvironment { false };
+    bool _splitDirectLight { false };
+    bool _generateReferenceIrradiance { false };
+    bool _saveGeneratedLights { false };
 
     std::string _activeGeometryId;
 

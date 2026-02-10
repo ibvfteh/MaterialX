@@ -13,6 +13,8 @@
 #endif
 
 #include <iostream>
+#include <array>
+#include <vector>
 
 MATERIALX_NAMESPACE_BEGIN
 
@@ -103,16 +105,37 @@ bool createEglHeadlessContext(EglHeadlessContext& ctx, int pbufferWidth, int pbu
         return false;
     }
 
-    const EGLint ctxAttribs[] = {
-        EGL_CONTEXT_MAJOR_VERSION, 4,
-        EGL_CONTEXT_MINOR_VERSION, 5,
-        EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
-        EGL_NONE
+    const std::array<std::vector<EGLint>, 3> ctxAttribSets = {
+        std::vector<EGLint>{ // Prefer core 4.5
+            EGL_CONTEXT_MAJOR_VERSION, 4,
+            EGL_CONTEXT_MINOR_VERSION, 5,
+            EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
+            EGL_NONE
+        },
+        std::vector<EGLint>{ // Fall back to core 4.1
+            EGL_CONTEXT_MAJOR_VERSION, 4,
+            EGL_CONTEXT_MINOR_VERSION, 1,
+            EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
+            EGL_NONE
+        },
+        std::vector<EGLint>{ // Last resort: any version
+            EGL_NONE
+        }
     };
-    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctxAttribs);
+
+    EGLContext context = EGL_NO_CONTEXT;
+    for (const auto& attribs : ctxAttribSets)
+    {
+        context = eglCreateContext(display, config, EGL_NO_CONTEXT, attribs.data());
+        if (context != EGL_NO_CONTEXT)
+        {
+            break;
+        }
+    }
+
     if (context == EGL_NO_CONTEXT)
     {
-        std::cerr << "eglCreateContext failed" << std::endl;
+        std::cerr << "eglCreateContext failed (all profiles)" << std::endl;
         eglDestroySurface(display, surface);
         eglTerminate(display);
         return false;

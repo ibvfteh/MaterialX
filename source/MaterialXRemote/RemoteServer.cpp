@@ -8,6 +8,8 @@
 #include <MaterialXRemote/Types.h>
 #include <MaterialXRemote/MaterialCatalog.h>
 #include <MaterialXRender/Util.h>
+#include <MaterialXRenderGlsl/GlslMaterial.h>
+#include <MaterialXGenShader/ShaderStage.h>
 #include <fstream>
 #include <MaterialXRemote/RemoteViewer.h>
 
@@ -268,6 +270,9 @@ void RemoteServer::Impl::registerRoutes()
             const std::string explicitPath = body.isMember("filePath") && body["filePath"].isString() ? body["filePath"].asString() : std::string();
             const std::string name = body.isMember("name") ? body["name"].asString() : std::string();
 
+            std::cout << "[RemoteServer] /materials/select name=" << name
+                      << " filePath=" << explicitPath << std::endl;
+
             SessionMaterial stored;
             bool selected = false;
 
@@ -314,6 +319,8 @@ void RemoteServer::Impl::registerRoutes()
             {
                 res.status = 404; res.set_content("Material not found", "text/plain"); return;
             }
+
+            std::cout << "[RemoteServer] /materials/select using path=" << stored.filePath << std::endl;
 
             // Enqueue viewer load with the original file path (viewer expects mx::FilePath)
             auto loadFuture = _session->enqueue([stored](RemoteViewer& viewer) {
@@ -791,168 +798,199 @@ void RemoteServer::Impl::registerRoutes()
                 Json::Value out(Json::objectValue);
                 Json::Value list(Json::arrayValue);
 
-                mx::MaterialPtr material = viewer.getSelectedMaterial();
-                if (!material)
+                try
                 {
-                    out["error"] = "No selected material available";
-                    return out;
-                }
-
-                const mx::VariableBlock* publicUniforms = material->getPublicUniforms();
-                if (!publicUniforms)
-                {
-                    out["uniforms"] = list;
-                    return out;
-                }
-
-                auto valueToJson = [](const mx::ValuePtr& v) -> Json::Value {
-                    Json::Value out;
-                    if (!v)
+                    mx::MaterialPtr material = viewer.getSelectedMaterial();
+                    if (!material)
                     {
+                        out["error"] = "No selected material available";
                         return out;
                     }
-                    const std::string t = v->getTypeString();
-                    if (t == "float")
-                    {
-                        out = v->asA<float>();
-                    }
-                    else if (t == "integer")
-                    {
-                        out = v->asA<int>();
-                    }
-                    else if (t == "boolean")
-                    {
-                        out = v->asA<bool>();
-                    }
-                    else if (t == "color3")
-                    {
-                        auto c = v->asA<mx::Color3>();
-                        out = Json::arrayValue; out.append(c[0]); out.append(c[1]); out.append(c[2]);
-                    }
-                    else if (t == "vector2")
-                    {
-                        auto c = v->asA<mx::Vector2>();
-                        out = Json::arrayValue; out.append(c[0]); out.append(c[1]);
-                    }
-                    else if (t == "vector3")
-                    {
-                        auto c = v->asA<mx::Vector3>();
-                        out = Json::arrayValue; out.append(c[0]); out.append(c[1]); out.append(c[2]);
-                    }
-                    else if (t == "vector4")
-                    {
-                        auto c = v->asA<mx::Vector4>();
-                        out = Json::arrayValue; out.append(c[0]); out.append(c[1]); out.append(c[2]); out.append(c[3]);
-                    }
-                    else
-                    {
-                        out = v->getValueString();
-                    }
-                    return out;
-                };
 
-                auto appendValue = [&](Json::Value& item, const mx::ValuePtr& v) {
-                    item["value"] = valueToJson(v);
-                };
-
-                auto appendUIProperties = [&](Json::Value& item, const mx::InputPtr& input) {
-                    if (!input)
+                    auto glslMaterial = std::dynamic_pointer_cast<mx::GlslMaterial>(material);
+                    if (!glslMaterial)
                     {
-                        return;
+                        out["error"] = "Selected material is not a GLSL material";
+                        return out;
                     }
 
-                    mx::UIProperties uiProps;
-                    if (mx::getUIProperties(input, mx::EMPTY_STRING, uiProps) == 0)
+                    if (!glslMaterial->getProgram())
                     {
-                        return;
-                    }
-
-                    Json::Value ui(Json::objectValue);
-                    if (!uiProps.uiName.empty()) ui["label"] = uiProps.uiName;
-                    if (!uiProps.uiFolder.empty()) ui["folder"] = uiProps.uiFolder;
-                    if (!uiProps.enumeration.empty())
-                    {
-                        Json::Value arr(Json::arrayValue);
-                        for (const auto& e : uiProps.enumeration) arr.append(e);
-                        ui["enum"] = arr;
-                    }
-                    if (!uiProps.enumerationValues.empty())
-                    {
-                        Json::Value arr(Json::arrayValue);
-                        for (const auto& ev : uiProps.enumerationValues) arr.append(valueToJson(ev));
-                        ui["enumValues"] = arr;
-                    }
-                    if (uiProps.uiMin) ui["min"] = valueToJson(uiProps.uiMin);
-                    if (uiProps.uiMax) ui["max"] = valueToJson(uiProps.uiMax);
-                    if (uiProps.uiSoftMin) ui["softMin"] = valueToJson(uiProps.uiSoftMin);
-                    if (uiProps.uiSoftMax) ui["softMax"] = valueToJson(uiProps.uiSoftMax);
-                    if (uiProps.uiStep) ui["step"] = valueToJson(uiProps.uiStep);
-                    if (uiProps.uiAdvanced) ui["advanced"] = uiProps.uiAdvanced;
-
-                    if (!ui.empty())
-                    {
-                        item["ui"] = ui;
-                    }
-                };
-
-                mx::DocumentPtr doc = material->getDocument();
-
-                for (const auto& uniform : publicUniforms->getVariableOrder())
-                {
-                    const std::string& uname = uniform->getName();
-                    if (uname.rfind("SR_", 0) == 0)
-                    {
-                        continue;
-                    }
-                    // Verify the uniform is actually present and editable in the compiled program
-                    if (!material->findUniform(uniform->getPath()))
-                    {
-                        continue;
-                    }
-                    Json::Value item(Json::objectValue);
-                    item["path"] = uniform->getPath();
-                    item["name"] = uniform->getName();
-                    item["variable"] = uniform->getVariable();
-                    item["type"] = uniform->getType().getName();
-                    appendValue(item, uniform->getValue());
-                    if (!uniform->getUnit().empty()) item["unit"] = uniform->getUnit();
-                    if (!uniform->getColorSpace().empty()) item["colorspace"] = uniform->getColorSpace();
-
-                    mx::InputPtr input;
-                    if (doc)
-                    {
-                        mx::ElementPtr pathElement = doc->getDescendant(uniform->getPath());
-                        input = pathElement ? pathElement->asA<mx::Input>() : nullptr;
-                        if (input)
+                        mx::ShaderPtr shader = material->getShader();
+                        if (!shader)
                         {
-                            mx::InputPtr interfaceInput = input->getInterfaceInput();
-                            if (interfaceInput)
+                            out["error"] = "Cannot parse uniforms: shader not generated";
+                            return out;
+                        }
+                        glslMaterial->setProgramStages(shader->getSourceCode(mx::Stage::VERTEX), shader->getSourceCode(mx::Stage::PIXEL));
+                    }
+
+                    const mx::VariableBlock* publicUniforms = material->getPublicUniforms();
+                    if (!publicUniforms)
+                    {
+                        out["uniforms"] = list;
+                        return out;
+                    }
+
+                    auto valueToJson = [](const mx::ValuePtr& v) -> Json::Value {
+                        Json::Value out;
+                        if (!v)
+                        {
+                            return out;
+                        }
+                        const std::string t = v->getTypeString();
+                        if (t == "float")
+                        {
+                            out = v->asA<float>();
+                        }
+                        else if (t == "integer")
+                        {
+                            out = v->asA<int>();
+                        }
+                        else if (t == "boolean")
+                        {
+                            out = v->asA<bool>();
+                        }
+                        else if (t == "color3")
+                        {
+                            auto c = v->asA<mx::Color3>();
+                            out = Json::arrayValue; out.append(c[0]); out.append(c[1]); out.append(c[2]);
+                        }
+                        else if (t == "vector2")
+                        {
+                            auto c = v->asA<mx::Vector2>();
+                            out = Json::arrayValue; out.append(c[0]); out.append(c[1]);
+                        }
+                        else if (t == "vector3")
+                        {
+                            auto c = v->asA<mx::Vector3>();
+                            out = Json::arrayValue; out.append(c[0]); out.append(c[1]); out.append(c[2]);
+                        }
+                        else if (t == "vector4")
+                        {
+                            auto c = v->asA<mx::Vector4>();
+                            out = Json::arrayValue; out.append(c[0]); out.append(c[1]); out.append(c[2]); out.append(c[3]);
+                        }
+                        else
+                        {
+                            out = v->getValueString();
+                        }
+                        return out;
+                    };
+
+                    auto appendValue = [&](Json::Value& item, const mx::ValuePtr& v) {
+                        item["value"] = valueToJson(v);
+                    };
+
+                    auto appendUIProperties = [&](Json::Value& item, const mx::InputPtr& input) {
+                        if (!input)
+                        {
+                            return;
+                        }
+
+                        mx::UIProperties uiProps;
+                        if (mx::getUIProperties(input, mx::EMPTY_STRING, uiProps) == 0)
+                        {
+                            return;
+                        }
+
+                        Json::Value ui(Json::objectValue);
+                        if (!uiProps.uiName.empty()) ui["label"] = uiProps.uiName;
+                        if (!uiProps.uiFolder.empty()) ui["folder"] = uiProps.uiFolder;
+                        if (!uiProps.enumeration.empty())
+                        {
+                            Json::Value arr(Json::arrayValue);
+                            for (const auto& e : uiProps.enumeration) arr.append(e);
+                            ui["enum"] = arr;
+                        }
+                        if (!uiProps.enumerationValues.empty())
+                        {
+                            Json::Value arr(Json::arrayValue);
+                            for (const auto& ev : uiProps.enumerationValues) arr.append(valueToJson(ev));
+                            ui["enumValues"] = arr;
+                        }
+                        if (uiProps.uiMin) ui["min"] = valueToJson(uiProps.uiMin);
+                        if (uiProps.uiMax) ui["max"] = valueToJson(uiProps.uiMax);
+                        if (uiProps.uiSoftMin) ui["softMin"] = valueToJson(uiProps.uiSoftMin);
+                        if (uiProps.uiSoftMax) ui["softMax"] = valueToJson(uiProps.uiSoftMax);
+                        if (uiProps.uiStep) ui["step"] = valueToJson(uiProps.uiStep);
+                        if (uiProps.uiAdvanced) ui["advanced"] = uiProps.uiAdvanced;
+
+                        if (!ui.empty())
+                        {
+                            item["ui"] = ui;
+                        }
+                    };
+
+                    mx::DocumentPtr doc = material->getDocument();
+
+                    for (const auto& uniform : publicUniforms->getVariableOrder())
+                    {
+                        const std::string& uname = uniform->getName();
+                        if (uname.rfind("SR_", 0) == 0)
+                        {
+                            continue;
+                        }
+                        // Verify the uniform is actually present and editable in the compiled program
+                        if (!material->findUniform(uniform->getPath()))
+                        {
+                            continue;
+                        }
+                        Json::Value item(Json::objectValue);
+                        item["path"] = uniform->getPath();
+                        item["name"] = uniform->getName();
+                        item["variable"] = uniform->getVariable();
+                        item["type"] = uniform->getType().getName();
+                        appendValue(item, uniform->getValue());
+                        if (!uniform->getUnit().empty()) item["unit"] = uniform->getUnit();
+                        if (!uniform->getColorSpace().empty()) item["colorspace"] = uniform->getColorSpace();
+
+                        mx::InputPtr input;
+                        if (doc)
+                        {
+                            mx::ElementPtr pathElement = doc->getDescendant(uniform->getPath());
+                            input = pathElement ? pathElement->asA<mx::Input>() : nullptr;
+                            if (input)
                             {
-                                input = interfaceInput;
+                                mx::InputPtr interfaceInput = input->getInterfaceInput();
+                                if (interfaceInput)
+                                {
+                                    input = interfaceInput;
+                                }
                             }
                         }
-                    }
-                    appendUIProperties(item, input);
+                        appendUIProperties(item, input);
 
-                    // Keep only controllable (UI-authored) uniforms; skip plumbing without UI hints.
-                    if (!item.isMember("ui"))
-                    {
-                        continue;
+                        // Keep only controllable (UI-authored) uniforms; skip plumbing without UI hints.
+                        if (!item.isMember("ui"))
+                        {
+                            continue;
+                        }
+
+                        list.append(item);
                     }
 
-                    list.append(item);
+                    out["uniforms"] = list;
+                }
+                catch (const std::exception& ex)
+                {
+                    out["error"] = ex.what();
                 }
 
-                out["uniforms"] = list;
                 return out;
             });
 
             Json::Value response = future.get();
             Json::StreamWriterBuilder builder; builder["indentation"] = "";
+            if (response.isMember("error"))
+            {
+                std::cout << "[RemoteServer] /uniforms error: " << response["error"].asString() << std::endl;
+            }
             res.status = 200; res.set_content(Json::writeString(builder, response), "application/json");
         }
         catch (const std::exception& ex)
         {
+            std::cout << "[RemoteServer] /uniforms exception: " << ex.what() << std::endl;
             res.status = 500; res.set_content(ex.what(), "text/plain");
         }
     });
@@ -1035,6 +1073,7 @@ void RemoteServer::Impl::registerRoutes()
         }
         catch (const std::exception& ex)
         {
+            std::cout << "[RemoteServer] /uniforms error: " << ex.what() << std::endl;
             res.status = 500; res.set_content(ex.what(), "text/plain");
         }
     });
@@ -1289,7 +1328,11 @@ void RemoteServer::Impl::registerRoutes()
 void RemoteServer::Impl::handleHealthCheck(const httplib::Request&, httplib::Response& res)
 {
     Json::Value root(Json::objectValue);
-    root["status"] = _session->isRunning() ? "ok" : "uninitialized";
+    const bool running = _session->isRunning();
+    root["status"] = running ? "ok" : "uninitialized";
+
+    // Simple stdout trace to help diagnose startup issues.
+    std::cout << "[RemoteServer] /health status=" << root["status"].asString() << std::endl;
 
     Json::StreamWriterBuilder builder;
     builder["indentation"] = "";

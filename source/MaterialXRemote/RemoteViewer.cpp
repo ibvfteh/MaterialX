@@ -201,10 +201,17 @@ std::pair<Json::Value, std::vector<std::string>> RemoteViewer::renderStateless(c
             catch (...) {}
         };
 
-        auto uniformResult = RemoteViewerCommon::applyUniformPayload(
-            material,
-            uniformsPayload,
-            [](const std::string& msg) { std::cout << "[RemoteViewer] " << msg << std::endl; });
+        auto logFn = [](const std::string& msg) { std::cout << "[RemoteViewer] " << msg << std::endl; };
+
+        auto reapplyResult = RemoteViewerCommon::reapplyStoredUniformValues(material, nullptr);
+        if (!reapplyResult.success)
+        {
+            restoreState();
+            meta["error"] = reapplyResult.error;
+            return { meta, images };
+        }
+
+        auto uniformResult = RemoteViewerCommon::applyUniformPayload(material, uniformsPayload, logFn);
         if (!uniformResult.success)
         {
             restoreState();

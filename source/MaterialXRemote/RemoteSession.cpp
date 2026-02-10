@@ -160,6 +160,10 @@ void RemoteSession::renderLoop(std::shared_ptr<std::promise<void>> startupPromis
 
     try
     {
+#if !defined(MATERIALX_REMOTE_EGL_ONLY)
+        nanogui::init();
+#endif
+
         auto viewer = std::make_shared<RemoteViewer>(_config.viewerOptions);
         viewer->initializeRemote();
 
@@ -211,6 +215,10 @@ void RemoteSession::renderLoop(std::shared_ptr<std::promise<void>> startupPromis
             _state = State::Idle;
             _renderThreadException = nullptr;
         }
+
+#if !defined(MATERIALX_REMOTE_EGL_ONLY)
+        nanogui::shutdown();
+#endif
     }
     catch (...)
     {
@@ -233,6 +241,10 @@ void RemoteSession::renderLoop(std::shared_ptr<std::promise<void>> startupPromis
             _viewer.reset();
             _state = State::Idle;
         }
+
+#if !defined(MATERIALX_REMOTE_EGL_ONLY)
+        nanogui::shutdown();
+#endif
 
         _startupPromise.reset();
 
