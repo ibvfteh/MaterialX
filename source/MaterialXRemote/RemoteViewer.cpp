@@ -21,6 +21,8 @@
 #include <MaterialXRenderGlsl/GlslMaterial.h>
 #include <MaterialXRender/ShaderRenderer.h>
 
+#include <GLFW/glfw3.h>
+
 #include <nanogui/window.h>
 // For timing
 #include <chrono>
@@ -76,6 +78,13 @@ RemoteViewer::RemoteViewer(const Options& options) :
 void RemoteViewer::initializeRemote()
 {
     initialize();
+
+    // Force 1:1 pixel ratio so requested sizes aren't multiplied by monitor DPI.
+    m_pixel_ratio = 1.0f;
+    if (GLFWwindow* win = glfw_window())
+    {
+        glfwSetWindowContentScaleCallback(win, nullptr);
+    }
 
     if (isHeadless())
     {
