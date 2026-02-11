@@ -29,8 +29,9 @@ struct EglHeadlessContext
 // Create a headless EGL desktop GL context with a tiny Pbuffer surface.
 // Returns true on success; leaves context current.
 MX_RENDERGLSL_API bool createEglHeadlessContext(EglHeadlessContext& ctx,
-												int pbufferWidth = 1,
-												int pbufferHeight = 1);
+								int pbufferWidth = 1,
+								int pbufferHeight = 1,
+								int deviceIndex = 0);
 
 // Destroy the EGL headless context (safe to call on a default-initialized ctx).
 MX_RENDERGLSL_API void destroyEglHeadlessContext(EglHeadlessContext& ctx);

@@ -46,6 +46,7 @@ class RemoteViewer : public ::Viewer
         int screenWidth = 1280;
         int screenHeight = 960;
         mx::Color3 screenColor = mx::DEFAULT_SCREEN_COLOR_SRGB;
+        int gpuIndex = 0;
         // Headless flag: false -> windowed, true -> windowless. EGL builds ignore and run headless.
         bool headless = true;
     };

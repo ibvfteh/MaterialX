@@ -87,10 +87,7 @@ void RemoteViewerEgl::applyCameraState()
     const unsigned int safeWidth = std::max(1u, _width);
     const unsigned int safeHeight = std::max(1u, _height);
 
-    const mx::Vector3 centeredPos = _cameraPos + _centeringOffset;
-    const mx::Vector3 centeredTarget = _cameraTarget + _centeringOffset;
-
-    const mx::Matrix44 viewMatrix = mx::Camera::createViewMatrix(centeredPos, centeredTarget, mx::Vector3(0, 1, 0));
+    const mx::Matrix44 viewMatrix = mx::Camera::createViewMatrix(_cameraPos, _cameraTarget, mx::Vector3(0, 1, 0));
     _camera->setViewportSize(mx::Vector2((float) safeWidth, (float) safeHeight));
     _camera->setViewMatrix(viewMatrix);
 
@@ -104,6 +101,7 @@ void RemoteViewerEgl::applyCameraState()
     const float r = t * aspect;
     const float l = -r;
     _camera->setProjectionMatrix(mx::Camera::createPerspectiveMatrix(l, r, b, t, n, f));
+    _camera->setWorldMatrix(mx::Matrix44::createTranslation(-_centeringOffset));
 }
 
 void RemoteViewerEgl::centerCameraToGeometry()
@@ -135,7 +133,7 @@ void RemoteViewerEgl::initializeRemote()
         return;
     }
 
-    if (!createEglHeadlessContext(_eglCtx))
+    if (!createEglHeadlessContext(_eglCtx, 1, 1, _options.gpuIndex))
     {
         throw std::runtime_error("Failed to initialize EGL headless context");
     }
@@ -642,7 +640,7 @@ void RemoteViewerEgl::renderFrame()
             if (shadowMap)
             {
                 shadowState.shadowMap = shadowMap;
-                shadowState.shadowMatrix = _camera->getViewMatrix().getInverse() * _shadowCamera->getWorldViewProjMatrix();
+                shadowState.shadowMatrix = _camera->getWorldMatrix().getInverse() * _shadowCamera->getWorldViewProjMatrix();
             }
             // Restore primary framebuffer and state after offscreen shadow pass.
             _framebuffer->bind();

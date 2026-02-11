@@ -1330,6 +1330,7 @@ void RemoteServer::Impl::handleHealthCheck(const httplib::Request&, httplib::Res
     Json::Value root(Json::objectValue);
     const bool running = _session->isRunning();
     root["status"] = running ? "ok" : "uninitialized";
+    root["gpuIndex"] = _session->getGpuIndex();
 
     // Simple stdout trace to help diagnose startup issues.
     std::cout << "[RemoteServer] /health status=" << root["status"].asString() << std::endl;

@@ -35,6 +35,7 @@ int main(int argc, char** argv)
         bool headless = false;
         std::string bindAddress = "0.0.0.0";
         int port = 2907;
+        int gpuIndex = 0;
 
         std::string materialPath;
         float refreshMs = 16.0f;
@@ -53,6 +54,10 @@ int main(int argc, char** argv)
             {
                 port = std::atoi(argv[++i]);
             }
+            else if (arg == "--gpu-index" && i + 1 < argc)
+            {
+                gpuIndex = std::atoi(argv[++i]);
+            }
             else if (arg == "--material" && i + 1 < argc)
             {
                 materialPath = argv[++i];
@@ -67,7 +72,8 @@ int main(int argc, char** argv)
                 std::cout << "Usage: MaterialXRemoteServer [options]\n"
                              "  --headless           Hide GLFW window (offscreen)\n"
                              "  --bind <address>     Bind address (default 0.0.0.0)\n"
-                             "  --port <port>        Listen port (default 2907)\n";
+                             "  --port <port>        Listen port (default 2907)\n"
+                             "  --gpu-index <index>  EGL device index (default 0)\n";
                 return EXIT_SUCCESS;
             }
         }
@@ -75,6 +81,7 @@ int main(int argc, char** argv)
         RemoteSession::Config sessionConfig;
         sessionConfig.refreshPeriodMs = refreshMs;
         sessionConfig.viewerOptions.headless = headless;
+        sessionConfig.viewerOptions.gpuIndex = gpuIndex;
 
         std::cout << "Starting remote session ("
     #if defined(MATERIALX_REMOTE_EGL_ONLY)

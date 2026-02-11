@@ -48,6 +48,7 @@ class RemoteSession
     void stop();
 
     bool isRunning() const;
+    int getGpuIndex() const { return _config.viewerOptions.gpuIndex; }
 
     // Session material APIs: select by existing filesystem path (catalog selection).
     // The session will only remember the file path (and name); it will not copy the file.

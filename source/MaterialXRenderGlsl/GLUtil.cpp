@@ -32,12 +32,14 @@ namespace
 {
 using PFN_eglQueryDevicesEXT = EGLBoolean (*)(EGLint, EGLDeviceEXT*, EGLint*);
 using PFN_eglGetPlatformDisplayEXT = EGLDisplay (*)(EGLenum, void*, const EGLint*);
+using PFN_eglQueryDeviceStringEXT = const char* (*)(EGLDeviceEXT, EGLint);
 }
 
-bool createEglHeadlessContext(EglHeadlessContext& ctx, int pbufferWidth, int pbufferHeight)
+bool createEglHeadlessContext(EglHeadlessContext& ctx, int pbufferWidth, int pbufferHeight, int deviceIndex)
 {
     PFN_eglQueryDevicesEXT queryDevices = reinterpret_cast<PFN_eglQueryDevicesEXT>(eglGetProcAddress("eglQueryDevicesEXT"));
     PFN_eglGetPlatformDisplayEXT getPlatformDisplay = reinterpret_cast<PFN_eglGetPlatformDisplayEXT>(eglGetProcAddress("eglGetPlatformDisplayEXT"));
+    PFN_eglQueryDeviceStringEXT queryDeviceString = reinterpret_cast<PFN_eglQueryDeviceStringEXT>(eglGetProcAddress("eglQueryDeviceStringEXT"));
     if (!queryDevices || !getPlatformDisplay)
     {
         std::cerr << "EGL_EXT_device_base not available" << std::endl;
@@ -52,7 +54,22 @@ bool createEglHeadlessContext(EglHeadlessContext& ctx, int pbufferWidth, int pbu
         return false;
     }
 
-    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_DEVICE_EXT, devices[0], nullptr);
+    if (deviceIndex < 0 || deviceIndex >= numDevices)
+    {
+        std::cerr << "Requested EGL device index " << deviceIndex << " out of range (found " << numDevices << ")" << std::endl;
+        return false;
+    }
+
+    EGLDeviceEXT chosen = devices[deviceIndex];
+    const char* vendor = queryDeviceString ? queryDeviceString(chosen, EGL_VENDOR) : nullptr;
+    std::cout << "[EGL] Selecting device index " << deviceIndex;
+    if (vendor)
+    {
+        std::cout << " vendor=" << vendor;
+    }
+    std::cout << std::endl;
+
+    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_DEVICE_EXT, chosen, nullptr);
     if (display == EGL_NO_DISPLAY)
     {
         std::cerr << "eglGetPlatformDisplayEXT failed" << std::endl;
@@ -186,7 +203,7 @@ void destroyEglHeadlessContext(EglHeadlessContext& ctx)
 
 #else
 
-bool createEglHeadlessContext(EglHeadlessContext&, int, int)
+bool createEglHeadlessContext(EglHeadlessContext&, int, int, int)
 {
     std::cerr << "EGL headless backend not available on this platform/build" << std::endl;
     return false;
