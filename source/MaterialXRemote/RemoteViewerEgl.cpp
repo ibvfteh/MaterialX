@@ -91,7 +91,7 @@ void RemoteViewerEgl::applyCameraState()
     _camera->setViewportSize(mx::Vector2((float) safeWidth, (float) safeHeight));
     _camera->setViewMatrix(viewMatrix);
 
-    const float fovY = std::max(1.0f, _cameraViewAngle / std::max(0.001f, _cameraZoom));
+    const float fovY = std::max(1.0f, _cameraViewAngle);
     const float aspect = (float) safeWidth / (float) safeHeight;
     const float n = 0.05f;
     const float f = 100.0f;
@@ -101,7 +101,9 @@ void RemoteViewerEgl::applyCameraState()
     const float r = t * aspect;
     const float l = -r;
     _camera->setProjectionMatrix(mx::Camera::createPerspectiveMatrix(l, r, b, t, n, f));
-    _camera->setWorldMatrix(mx::Matrix44::createTranslation(-_centeringOffset));
+
+    const float scale = std::max(0.0001f, _geometryScale * _cameraZoom);
+    _camera->setWorldMatrix(mx::Matrix44::createTranslation(-_centeringOffset) * mx::Matrix44::createScale(mx::Vector3(scale)));
 }
 
 void RemoteViewerEgl::centerCameraToGeometry()
@@ -116,8 +118,10 @@ void RemoteViewerEgl::centerCameraToGeometry()
     const mx::Vector3& boxMax = _geometryHandler->getMaximumBounds();
     const mx::Vector3& boxMin = _geometryHandler->getMinimumBounds();
     const mx::Vector3 center = (boxMax + boxMin) * 0.5f;
+    const float radius = (center - boxMin).getMagnitude();
 
     _centeringOffset = center;
+    _geometryScale = (radius > 0.0f) ? (2.0f / radius) : 1.0f; // Align with windowed viewer IDEAL_MESH_SPHERE_RADIUS=2
     applyCameraState();
 }
 

@@ -128,6 +128,7 @@ class RemoteViewerEgl
     mx::GlslMaterialPtr _shadowBlurMaterial;
     unsigned int _shadowSoftness { 1 };
     mx::MeshPtr _quadMesh;
+    float _geometryScale { 1.0f };
     mx::DocumentPtr _lightRigDoc;
     mx::FilePath _lightRigFilename;
 
